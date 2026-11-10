@@ -29,5 +29,7 @@ COPY --from=build --chown=app:app /app/node_modules/drizzle-orm ./node_modules/d
 COPY --from=build --chown=app:app /app/node_modules/postgres ./node_modules/postgres
 USER app
 EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD wget -qO- http://127.0.0.1:3000/api/health || exit 1
-CMD ["sh", "-c", "node scripts/migrate.mjs && node server.js"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD wget -qO- http://127.0.0.1:3000/api/health >/dev/null || exit 1
+# HOSTNAME dipaksa 0.0.0.0 saat start: Docker Swarm (dipakai Dokploy) menimpa HOSTNAME
+# dengan ID container, sehingga Next.js hanya mendengarkan di satu IP dan Traefik dapat 502.
+CMD ["sh", "-c", "node scripts/migrate.mjs && HOSTNAME=0.0.0.0 exec node server.js"]
