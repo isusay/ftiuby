@@ -50,7 +50,14 @@ export async function getCurrentUser(): Promise<User | null> {
     const { payload } = await jwtVerify(token, key(), { algorithms: ["HS256"] });
     if (!payload.sub) return null;
     const user = await db.query.users.findFirst({ where: eq(users.id, payload.sub) });
-    return user ?? null;
+    if (!user) return null;
+    // Admin yang dihapus dari ADMIN_GITHUB_LOGINS langsung kehilangan akses,
+    // tanpa menunggu sesinya (30 hari) habis atau login ulang.
+    if (user.role === "ADMIN" && !env.adminLogins.includes(user.login.toLowerCase())) {
+      await db.update(users).set({ role: "USER" }).where(eq(users.id, user.id));
+      return { ...user, role: "USER" };
+    }
+    return user;
   } catch {
     return null;
   }

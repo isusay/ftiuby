@@ -35,6 +35,7 @@ async function gh<T>(path: string, token?: string): Promise<T> {
 
 export type GhUser = { id: number; login: string; name: string | null; avatar_url: string };
 export type GhRepo = {
+  id: number;
   name: string;
   full_name: string;
   private: boolean;
@@ -43,7 +44,7 @@ export type GhRepo = {
   default_branch: string;
   description: string | null;
   html_url: string;
-  owner: { login: string };
+  owner: { id: number; login: string };
   pushed_at: string;
 };
 
@@ -61,6 +62,11 @@ export function getRepo(owner: string, repo: string) {
   return gh<GhRepo>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
 }
 
+/** Cari repository berdasarkan ID numerik; tetap valid walau repo atau pemiliknya ganti nama. */
+export function getRepoById(id: number) {
+  return gh<GhRepo>(`/repositories/${id}`);
+}
+
 export async function listBranches(owner: string, repo: string): Promise<string[]> {
   const b = await gh<{ name: string }[]>(
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=100`,
@@ -68,13 +74,18 @@ export async function listBranches(owner: string, repo: string): Promise<string[
   return b.map((x) => x.name);
 }
 
-export type TreeEntry = { path: string; type: "blob" | "tree" | "commit"; size?: number };
+export type TreeEntry = { path: string; type: "blob" | "tree" | "commit"; sha: string; size?: number };
 
-export async function getTree(owner: string, repo: string, branch: string) {
-  const t = await gh<{ tree: TreeEntry[]; truncated: boolean }>(
-    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+/** Isi branch pada satu commit tertentu: commit SHA + daftar file (rekursif). */
+export async function getSnapshot(owner: string, repo: string, branch: string) {
+  const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const b = await gh<{ commit: { sha: string; commit: { tree: { sha: string } } } }>(
+    `${base}/branches/${encodeURIComponent(branch)}`,
   );
-  return t;
+  const t = await gh<{ tree: TreeEntry[]; truncated: boolean }>(
+    `${base}/git/trees/${b.commit.commit.tree.sha}?recursive=1`,
+  );
+  return { commitSha: b.commit.sha, tree: t.tree, truncated: t.truncated };
 }
 
 /** Ambil isi file teks kecil (package.json, next.config, dll). */

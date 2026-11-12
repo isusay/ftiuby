@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { projects } from "@/lib/schema";
-import { triggerDeploy } from "@/lib/deploy";
+import { guardedDeploy } from "@/lib/deploy";
 
 /** Webhook push GitHub → build ulang otomatis. Diverifikasi dengan HMAC SHA-256 per project. */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -26,15 +26,17 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (event === "ping") return NextResponse.json({ ok: true, message: "Webhook terhubung" });
   if (event !== "push") return NextResponse.json({ ok: true, ignored: event });
 
-  let payload: { ref?: string; repository?: { full_name?: string } };
+  let payload: { ref?: string; repository?: { id?: number; full_name?: string } };
   try {
     payload = JSON.parse(body);
   } catch {
     return new NextResponse("Bad JSON", { status: 400 });
   }
 
-  const repoMatches =
-    payload.repository?.full_name?.toLowerCase() === `${project.repoOwner}/${project.repoName}`.toLowerCase();
+  // Cocokkan lewat ID repo (tahan ganti nama); project lama tanpa repoId memakai nama.
+  const repoMatches = project.repoId
+    ? payload.repository?.id === project.repoId
+    : payload.repository?.full_name?.toLowerCase() === `${project.repoOwner}/${project.repoName}`.toLowerCase();
   if (!repoMatches) return NextResponse.json({ ok: true, ignored: "repository lain" });
   if (payload.ref !== `refs/heads/${project.branch}`) return NextResponse.json({ ok: true, ignored: "branch lain" });
 
@@ -46,6 +48,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return NextResponse.json({ ok: true, ignored: "deploy terlalu rapat" });
   }
 
-  await triggerDeploy(project, "Push ke " + project.branch);
+  const outcome = await guardedDeploy(project, "Push ke " + project.branch);
+  if ("held" in outcome) return NextResponse.json({ ok: true, held: true, reason: outcome.reason });
   return NextResponse.json({ ok: true, deploying: true });
 }

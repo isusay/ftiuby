@@ -1,5 +1,6 @@
 import "server-only";
-import { getRepo, getTree, getFileText, GitHubError } from "./github";
+import { createHash } from "node:crypto";
+import { getRepo, getSnapshot, getFileText, GitHubError, type TreeEntry } from "./github";
 import type { Framework } from "./schema";
 
 export type PreflightResult = {
@@ -9,6 +10,12 @@ export type PreflightResult = {
   outputDir: string | null;
   buildCommand: string | null;
   packageManager: "npm" | "pnpm" | null;
+  /** ID numerik repository di GitHub (tetap walau repo/pemilik ganti nama). */
+  repoId: number | null;
+  /** Commit yang diperiksa. */
+  commitSha: string | null;
+  /** Hash file yang menentukan perintah build; null bila tidak bisa dihitung lengkap. */
+  fingerprint: string | null;
   errors: string[];
   warnings: string[];
 };
@@ -40,30 +47,85 @@ function isForeignSpec(spec: string): boolean {
 function fail(errors: string[], warnings: string[] = []): PreflightResult {
   return {
     ok: false, framework: null, frameworkLabel: null, outputDir: null,
-    buildCommand: null, packageManager: null, errors, warnings,
+    buildCommand: null, packageManager: null, repoId: null, commitSha: null, fingerprint: null, errors, warnings,
   };
 }
 
-export async function runPreflight(owner: string, repo: string, branch: string): Promise<PreflightResult> {
+/**
+ * File yang ikut menentukan apa yang dijalankan saat install/build: manifest & lockfile,
+ * konfigurasi npm/pnpm/nixpacks, file *.config.* dan *rc.js (dieksekusi oleh tool build),
+ * script di root dan folder scripts/. Perubahan di sini menahan auto-deploy sampai admin meninjau.
+ */
+const BUILD_FILE_RE = new RegExp(
+  [
+    String.raw`(^|/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?)$`,
+    String.raw`(^|/)(\.npmrc|\.pnpmfile\.cjs|\.yarnrc(\.yml)?|\.nvmrc|\.node-version|\.tool-versions)$`,
+    String.raw`(^|/)(nixpacks\.(toml|json)|Procfile|Dockerfile|railpack\.json|\.env[^/]*)$`,
+    String.raw`(^|/)[^/]+\.config\.[cm]?[jt]sx?$`,
+    String.raw`(^|/)[^/]+\.config\.json$`,
+    String.raw`(^|/)\.[^/]+rc\.[cm]?[jt]s$`,
+    String.raw`^[^/]+\.[cm]?[jt]s$`,
+    String.raw`^scripts/`,
+  ].join("|"),
+);
+
+export function isBuildFile(path: string) {
+  return BUILD_FILE_RE.test(path);
+}
+
+export function fingerprintTree(tree: TreeEntry[], truncated: boolean): string | null {
+  if (truncated) return null;
+  const lines = tree
+    .filter((t) => t.type === "blob" && isBuildFile(t.path))
+    .map((t) => `${t.path}\0${t.sha}`)
+    .sort();
+  return createHash("sha256").update(lines.join("\n")).digest("hex");
+}
+
+/** Fingerprint file build pada HEAD branch saat ini. */
+export async function currentFingerprint(owner: string, repo: string, branch: string) {
+  const snap = await getSnapshot(owner, repo, branch);
+  return { commitSha: snap.commitSha, fingerprint: fingerprintTree(snap.tree, snap.truncated) };
+}
+
+export async function runPreflight(
+  owner: string,
+  repo: string,
+  branch: string,
+  opts: { ownerId?: number } = {},
+): Promise<PreflightResult> {
   if (!REPO_PART_RE.test(owner) || !REPO_PART_RE.test(repo)) return fail(["Nama repository tidak valid."]);
   if (!BRANCH_RE.test(branch)) return fail(["Nama branch hanya boleh huruf, angka, titik, garis bawah, strip, dan garis miring."]);
 
   const errors: string[] = [];
   const warnings: string[] = [];
 
+  let repoId: number;
   try {
     const info = await getRepo(owner, repo);
     if (info.private) return fail(["Repository harus public."]);
+    if (opts.ownerId !== undefined && info.owner.id !== opts.ownerId) {
+      return fail(["Repository ini bukan milik akun GitHub-mu."]);
+    }
+    repoId = info.id;
   } catch (e) {
     return fail([e instanceof GitHubError ? e.message : "Gagal menghubungi GitHub."]);
   }
 
-  let tree;
+  let snap;
   try {
-    tree = await getTree(owner, repo, branch);
+    snap = await getSnapshot(owner, repo, branch);
   } catch (e) {
     return fail([e instanceof GitHubError ? e.message : "Gagal membaca isi repository."]);
   }
+  const tree = snap;
+  const commitSha = snap.commitSha;
+  const fingerprint = fingerprintTree(snap.tree, snap.truncated);
+  if (snap.truncated) {
+    warnings.push("Repository terlalu besar untuk diperiksa penuh; setiap update akan menunggu tinjauan admin.");
+  }
+  // Baca file dari commit yang sama dengan daftar file di atas.
+  const read = (path: string) => getFileText(owner, repo, commitSha, path);
 
   const files = new Set(tree.tree.filter((t) => t.type === "blob").map((t) => t.path));
   const rootFiles = [...files].filter((p) => !p.includes("/"));
@@ -88,7 +150,7 @@ export async function runPreflight(owner: string, repo: string, branch: string):
     }
     return {
       ok: errors.length === 0, framework: "HTML", frameworkLabel: FRAMEWORK_LABEL.HTML,
-      outputDir: ".", buildCommand: null, packageManager: null, errors, warnings,
+      outputDir: ".", buildCommand: null, packageManager: null, repoId, commitSha, fingerprint, errors, warnings,
     };
   }
 
@@ -104,7 +166,7 @@ export async function runPreflight(owner: string, repo: string, branch: string):
 
   let pkg: { scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
   try {
-    const raw = await getFileText(owner, repo, branch, "package.json");
+    const raw = await read("package.json");
     pkg = JSON.parse(raw ?? "{}");
   } catch {
     return fail([...errors, "package.json tidak bisa dibaca sebagai JSON yang valid."], warnings);
@@ -136,7 +198,7 @@ export async function runPreflight(owner: string, repo: string, branch: string):
     framework = "NEXT_EXPORT";
     outputDir = "out";
     const cfgPath = ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"].find(has);
-    const cfg = cfgPath ? await getFileText(owner, repo, branch, cfgPath) : null;
+    const cfg = cfgPath ? await read(cfgPath) : null;
     if (!cfg || !/output\s*:\s*["']export["']/.test(cfg)) {
       errors.push("Next.js wajib memakai output: 'export' di next.config.");
     }
@@ -158,7 +220,7 @@ export async function runPreflight(owner: string, repo: string, branch: string):
     outputDir = "dist";
     if (!scripts.build) errors.push("Tambahkan script \"build\": \"astro build\" di package.json.");
     const cfgPath = ["astro.config.mjs", "astro.config.ts", "astro.config.js"].find(has);
-    const cfg = cfgPath ? await getFileText(owner, repo, branch, cfgPath) : null;
+    const cfg = cfgPath ? await read(cfgPath) : null;
     if (cfg && /output\s*:\s*["'](server|hybrid)["']/.test(cfg)) errors.push("Astro harus memakai output static (bukan server/hybrid).");
     buildCommand = run("build");
   } else if ("vite" in deps) {
@@ -181,6 +243,9 @@ export async function runPreflight(owner: string, repo: string, branch: string):
     outputDir,
     buildCommand,
     packageManager: framework === "HTML" ? null : packageManager,
+    repoId,
+    commitSha,
+    fingerprint,
     errors,
     warnings,
   };

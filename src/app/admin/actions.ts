@@ -1,19 +1,23 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import { db } from "@/lib/db";
 import { invites, projects, users } from "@/lib/schema";
 import { AuthError, requireAdmin } from "@/lib/session";
-import { archiveProject, provisionProject, syncProject, triggerDeploy } from "@/lib/deploy";
+import {
+  archiveProject, provisionProject, RepoAccessError, reviewedFields, reviewRepo, syncProject,
+} from "@/lib/deploy";
 import { dokploy, DokployError } from "@/lib/dokploy";
-import { runPreflight } from "@/lib/preflight";
+import { GitHubError } from "@/lib/github";
 
 type State = { error?: string; ok?: string } | null;
 
 function errMsg(e: unknown) {
-  if (e instanceof AuthError || e instanceof DokployError) return e.message;
+  if (e instanceof AuthError || e instanceof DokployError || e instanceof GitHubError || e instanceof RepoAccessError) {
+    return e.message;
+  }
   console.error(e);
   return e instanceof Error ? e.message : "Terjadi kesalahan.";
 }
@@ -34,10 +38,27 @@ function done() {
 export async function approveProject(_: State, form: FormData): Promise<State> {
   try {
     const p = await loadProject(form);
-    if (p.status !== "SUBMITTED") return { error: "Hanya pengajuan berstatus Menunggu review yang bisa disetujui." };
 
-    // Cek ulang repo saat disetujui: isi repo bisa berubah sejak diajukan.
-    const pf = await runPreflight(p.repoOwner, p.repoName, p.branch);
+    // Klaim pengajuan secara atomik: kalau dua admin menekan "Setujui" bersamaan,
+    // hanya satu yang lolos sehingga aplikasi Dokploy tidak dibuat dua kali.
+    const [claimed] = await db
+      .update(projects)
+      .set({ status: "BUILDING", adminNote: null })
+      .where(and(eq(projects.id, p.id), eq(projects.status, "SUBMITTED")))
+      .returning();
+    if (!claimed) return { error: "Pengajuan ini sudah diproses atau bukan berstatus Menunggu review." };
+
+    // Cek ulang repo saat disetujui: isi repo (dan pemiliknya) bisa berubah sejak diajukan.
+    let review;
+    try {
+      review = await reviewRepo(claimed);
+    } catch (e) {
+      const note = e instanceof RepoAccessError ? e.message : `Pemeriksaan gagal: ${errMsg(e)}`;
+      await db.update(projects).set({ status: e instanceof RepoAccessError ? "NEEDS_REVISION" : "SUBMITTED", adminNote: note }).where(eq(projects.id, p.id));
+      done();
+      return { error: note };
+    }
+    const { pf } = review;
     if (!pf.ok || !pf.framework || !pf.outputDir) {
       await db
         .update(projects)
@@ -49,14 +70,7 @@ export async function approveProject(_: State, form: FormData): Promise<State> {
 
     const [fresh] = await db
       .update(projects)
-      .set({
-        status: "BUILDING",
-        adminNote: null,
-        framework: pf.framework,
-        outputDir: pf.outputDir,
-        buildCommand: pf.buildCommand,
-        packageManager: pf.packageManager,
-      })
+      .set(reviewedFields(pf))
       .where(eq(projects.id, p.id))
       .returning();
     try {
@@ -89,13 +103,24 @@ export async function requestRevision(_: State, form: FormData): Promise<State> 
   }
 }
 
+/**
+ * Admin meninjau isi repo saat ini lalu build ulang. Fingerprint file build disimpan sebagai
+ * versi yang sudah ditinjau, dan update yang tertahan dilepas.
+ * Periksa perubahan di GitHub (link "Lihat perubahan") sebelum menekan tombol ini.
+ */
 export async function adminRedeploy(_: State, form: FormData): Promise<State> {
   try {
     const p = await loadProject(form);
     if (!p.dokployAppId) return { error: "Project belum punya aplikasi di Dokploy." };
-    await triggerDeploy(p, "Build ulang oleh admin");
+    const { project, pf } = await reviewRepo(p);
+    if (!pf.ok || !pf.framework || !pf.outputDir) {
+      return { error: `Repo tidak lolos pemeriksaan: ${pf.errors.join(" ")} Minta revisi ke developer.` };
+    }
+    const [fresh] = await db.update(projects).set(reviewedFields(pf)).where(eq(projects.id, project.id)).returning();
+    // provisionProject menyimpan ulang repo, tipe build & env (bisa berubah), lalu deploy.
+    await provisionProject(fresh, "Build ulang setelah ditinjau admin");
     done();
-    return { ok: "Build ulang dimulai." };
+    return { ok: "Ditinjau dan build ulang dimulai." };
   } catch (e) {
     return { error: errMsg(e) };
   }

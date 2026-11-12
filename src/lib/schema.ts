@@ -38,7 +38,9 @@ export const frameworkEnum = pgEnum("framework", [
 export const users = pgTable("users", {
   id: text("id").primaryKey().$defaultFn(createId),
   githubId: integer("github_id").notNull().unique(),
-  login: text("login").notNull().unique(),
+  // Tidak unique: username GitHub bisa berpindah tangan setelah pemilik lamanya ganti nama.
+  // Identitas yang dipegang adalah githubId.
+  login: text("login").notNull(),
   name: text("name"),
   avatarUrl: text("avatar_url"),
   role: roleEnum("role").notNull().default("USER"),
@@ -68,6 +70,8 @@ export const projects = pgTable(
     category: text("category").notNull().default("Portfolio"),
     repoOwner: text("repo_owner").notNull(),
     repoName: text("repo_name").notNull(),
+    /** ID numerik repo GitHub; repoOwner/repoName hanya cache nama terkini. */
+    repoId: integer("repo_id"),
     branch: text("branch").notNull(),
     framework: frameworkEnum("framework").notNull(),
     outputDir: text("output_dir").notNull(),
@@ -78,6 +82,12 @@ export const projects = pgTable(
     dokployAppId: text("dokploy_app_id"),
     deployState: text("deploy_state"), // idle | running | done | error
     webhookSecret: text("webhook_secret").notNull(),
+    /** Fingerprint file build saat terakhir ditinjau admin; deploy otomatis hanya jika masih sama. */
+    reviewedFingerprint: text("reviewed_fingerprint"),
+    reviewedCommit: text("reviewed_commit"),
+    /** Diisi saat update ditahan karena file build berubah; dikosongkan saat admin meninjau. */
+    reviewHeldAt: timestamp("review_held_at", { withTimezone: true }),
+    reviewHeldReason: text("review_held_reason"),
     lastDeployAt: timestamp("last_deploy_at", { withTimezone: true }),
     liveAt: timestamp("live_at", { withTimezone: true }),
     likeCount: integer("like_count").notNull().default(0),

@@ -1,9 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { cookies } from "next/headers";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { env } from "@/lib/env";
 import { db } from "@/lib/db";
-import { users } from "@/lib/schema";
+import { projects, users } from "@/lib/schema";
 import { cookieName, createSession } from "@/lib/session";
 import { getAuthedUser } from "@/lib/github";
 
@@ -40,15 +40,26 @@ export async function GET(req: NextRequest) {
 
   let userId: string;
   if (existing) {
-    await db
-      .update(users)
-      .set({
-        login: gh.login,
-        name: gh.name,
-        avatarUrl: gh.avatar_url,
-        ...(isAdmin ? { role: "ADMIN" as const, activatedAt: existing.activatedAt ?? new Date() } : {}),
-      })
-      .where(eq(users.id, existing.id));
+    await db.transaction(async (tx) => {
+      await tx
+        .update(users)
+        .set({
+          login: gh.login,
+          name: gh.name,
+          avatarUrl: gh.avatar_url,
+          // ADMIN_GITHUB_LOGINS adalah sumber kebenaran: login yang dihapus dari daftar ikut diturunkan.
+          role: isAdmin ? "ADMIN" : "USER",
+          ...(isAdmin ? { activatedAt: existing.activatedAt ?? new Date() } : {}),
+        })
+        .where(eq(users.id, existing.id));
+      // Username GitHub berubah: perbarui cache pemilik repo di project miliknya.
+      if (existing.login !== gh.login) {
+        await tx
+          .update(projects)
+          .set({ repoOwner: gh.login })
+          .where(and(eq(projects.userId, existing.id), eq(projects.repoOwner, existing.login)));
+      }
+    });
     userId = existing.id;
   } else {
     const [created] = await db

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { desc, eq, inArray, count } from "drizzle-orm";
+import { desc, eq, inArray, isNotNull, count } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { env } from "@/lib/env";
 import { invites, projects, users, type ProjectStatus } from "@/lib/schema";
@@ -18,8 +18,9 @@ import { DokployCheck } from "./dokploy-check";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin — ftiuby" };
 
-const TABS: { key: string; label: string; statuses: ProjectStatus[] }[] = [
+const TABS: { key: string; label: string; statuses: ProjectStatus[]; held?: boolean }[] = [
   { key: "antrean", label: "Antrean", statuses: ["SUBMITTED"] },
+  { key: "tertahan", label: "Update tertahan", statuses: [], held: true },
   { key: "proses", label: "Build & gagal", statuses: ["BUILDING", "FAILED"] },
   { key: "live", label: "Live", statuses: ["LIVE"] },
   { key: "revisi", label: "Perlu revisi", statuses: ["NEEDS_REVISION"] },
@@ -33,7 +34,9 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
   const current = TABS.find((t) => t.key === tab) ?? TABS[0];
 
   const counts = await db.select({ status: projects.status, n: count() }).from(projects).groupBy(projects.status);
-  const countOf = (s: ProjectStatus[]) => counts.filter((c) => s.includes(c.status)).reduce((a, c) => a + Number(c.n), 0);
+  const [{ held }] = await db.select({ held: count() }).from(projects).where(isNotNull(projects.reviewHeldAt));
+  const countOf = (t: (typeof TABS)[number]) =>
+    t.held ? Number(held) : counts.filter((c) => t.statuses.includes(c.status)).reduce((a, c) => a + Number(c.n), 0);
   const slots = await slotStats();
 
   return (
@@ -63,11 +66,11 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
                 href={`/admin?view=project&tab=${t.key}`}
                 className={`px-3 py-2 -mb-px border-b-2 ${t.key === current.key ? "border-accent font-semibold" : "border-transparent text-muted hover:text-ink"}`}
               >
-                {t.label} <span className="text-muted">({countOf(t.statuses)})</span>
+                {t.label} <span className="text-muted">({countOf(t)})</span>
               </Link>
             ))}
           </nav>
-          <ProjectList statuses={current.statuses} />
+          <ProjectList statuses={current.statuses} held={current.held} />
         </>
       )}
       {view === "invite" && <Invites />}
@@ -77,12 +80,12 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
   );
 }
 
-async function ProjectList({ statuses }: { statuses: ProjectStatus[] }) {
+async function ProjectList({ statuses, held }: { statuses: ProjectStatus[]; held?: boolean }) {
   const rows = await db
     .select({ p: projects, login: users.login })
     .from(projects)
     .innerJoin(users, eq(users.id, projects.userId))
-    .where(inArray(projects.status, statuses))
+    .where(held ? isNotNull(projects.reviewHeldAt) : inArray(projects.status, statuses))
     .orderBy(desc(projects.updatedAt))
     .limit(100);
 
@@ -114,6 +117,26 @@ async function ProjectList({ statuses }: { statuses: ProjectStatus[] }) {
             <div><dt className="inline text-muted">Deploy </dt><dd className="inline">{p.deployState ?? "—"}</dd></div>
           </dl>
           {p.adminNote && <p className="text-sm text-muted mb-4 whitespace-pre-line">Catatan: {p.adminNote}</p>}
+          {p.reviewHeldAt && (
+            <div className="mb-4 rounded-lg border-l-4 border-danger bg-paper p-4 text-sm">
+              <p className="font-semibold mb-1">Update ditahan sejak {p.reviewHeldAt.toLocaleString("id-ID")}</p>
+              <p className="mb-2">{p.reviewHeldReason}</p>
+              <p className="text-muted">
+                Periksa perubahannya, terutama <span className="font-mono">scripts</span>, dependency baru, dan file konfigurasi
+                {" "}sebelum menekan &quot;Tinjau &amp; build ulang&quot;.{" "}
+                <a
+                  className="underline underline-offset-2"
+                  href={p.reviewedCommit
+                    ? `https://github.com/${p.repoOwner}/${p.repoName}/compare/${p.reviewedCommit}...${p.branch}`
+                    : `https://github.com/${p.repoOwner}/${p.repoName}/commits/${p.branch}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Lihat perubahan di GitHub
+                </a>
+              </p>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-start gap-4">
             {p.status === "SUBMITTED" && (
@@ -131,7 +154,14 @@ async function ProjectList({ statuses }: { statuses: ProjectStatus[] }) {
             )}
             {p.dokployAppId && (
               <>
-                <ActionForm action={adminRedeploy} hidden={{ id: p.id }} label="Build ulang" />
+                <ActionForm
+                  action={adminRedeploy}
+                  hidden={{ id: p.id }}
+                  label={p.reviewHeldAt ? "Tinjau & build ulang" : "Build ulang"}
+                  pendingLabel="Memeriksa repo…"
+                  variant={p.reviewHeldAt ? "primary" : undefined}
+                  confirm={p.reviewHeldAt ? "Sudah memeriksa perubahan file build? Kode ini akan dijalankan di server saat build." : undefined}
+                />
                 <ActionForm action={adminSync} hidden={{ id: p.id }} label="Cek status" />
               </>
             )}

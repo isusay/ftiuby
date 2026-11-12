@@ -143,6 +143,17 @@ function ActiveProject({ p }: { p: Project }) {
 
         <StatusMessage p={p} building={building} />
 
+        {p.reviewHeldAt && (
+          <div className="mt-4 rounded-lg border-l-4 border-danger bg-paper p-4">
+            <p className="font-semibold mb-1">Update menunggu tinjauan admin</p>
+            <p>{p.reviewHeldReason}</p>
+            <p className="text-muted text-sm mt-1">
+              Situs versi sebelumnya tetap tayang. Perubahan pada package.json, lockfile, atau file konfigurasi build
+              perlu dicek admin sebelum dijalankan di server.
+            </p>
+          </div>
+        )}
+
         {p.adminNote && (p.status === "NEEDS_REVISION" || p.status === "FAILED") && (
           <div className="mt-4 rounded-lg border-l-4 border-danger bg-paper p-4">
             <p className="font-semibold mb-1">Catatan admin</p>

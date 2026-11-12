@@ -8,7 +8,7 @@ Galeri dan hosting gratis untuk website statis karya komunitas ftiuby. Developer
 - Preflight otomatis: deteksi HTML / Vite / Astro / Next.js export / Nuxt generate / SvelteKit static, cek lockfile, tolak dependency non-npm, tolak CRA/PHP/backend
 - Review admin: setujui (otomatis buat aplikasi + domain + SSL di Dokploy), minta revisi dengan catatan, build ulang, arsipkan
 - Satu website aktif per developer; arsip membuka slot dan menghapus aplikasi di Dokploy
-- Auto-redeploy saat push lewat webhook GitHub (HMAC SHA-256 per project)
+- Auto-redeploy saat push lewat webhook GitHub (HMAC SHA-256 per project); ditahan untuk ditinjau admin bila file build berubah
 - Galeri dengan filter kategori, halaman detail dengan pratinjau, peringkat berdasarkan suka
 - Tema terang/gelap, responsif
 
@@ -84,7 +84,9 @@ Kirim pengajuan ────────────▶ status: Menunggu review
                                                                 application.deploy
                               status: Sedang build ◀─────────── applicationStatus (dipoll)
                               status: Live
-git push ──▶ webhook GitHub ▶ verifikasi HMAC ────────────────▶ application.deploy
+git push ──▶ webhook GitHub ▶ verifikasi HMAC
+                              file build sama dgn yg ditinjau? ─ya─▶ application.deploy
+                              tidak → "Update tertahan" (admin: Tinjau & build ulang)
 ```
 
 **Cara build per format:**
@@ -100,7 +102,10 @@ Kalau build versi baru gagal, container lama tetap berjalan sehingga situs tetap
 - **Cookie sesi** memakai prefix `__Host-` di production: hanya berlaku di `ftiuby.cloud`, tidak bisa ditimpa oleh situs pengguna di subdomain.
 - **CSRF dari subdomain:** situs pengguna di `*.ftiuby.cloud` dianggap *same-site* oleh browser. Semua aksi yang mengubah data memverifikasi header `Origin` (server actions Next.js melakukannya bawaan; route POST memakai `isSameOrigin`).
 - **Token GitHub** dari login hanya dipakai sekali untuk membaca profil, tidak disimpan.
-- **Kode pengguna di-build di server Dokploy-mu.** Review admin adalah pengaman utama — periksa repo sebelum menyetujui, terutama script `build` dan `postinstall` di `package.json`. Atur `SITE_MEMORY_LIMIT` dan `SITE_CPU_LIMIT`, dan pertimbangkan *build server* terpisah di Dokploy (`DOKPLOY_SERVER_ID`) bila jumlah pengguna bertambah.
+- **Gerbang review untuk update.** Saat disetujui, sistem menyimpan *fingerprint* file yang menentukan proses install/build (`package.json`, lockfile, `.npmrc`, `nixpacks.toml`, `*.config.*`, `*rc.js`, file `.js/.ts` di root, folder `scripts/`). Push atau "Build ulang" dari developer hanya di-deploy otomatis bila fingerprint itu tidak berubah; bila berubah, update masuk tab **Admin → Update tertahan** dengan link diff ke GitHub. HTML statis tidak menjalankan kode saat build sehingga selalu di-deploy otomatis. Project yang dibuat sebelum fitur ini akan tertahan sekali pada push pertama sampai admin meninjaunya.
+- **Kepemilikan repo** dilacak lewat ID numerik GitHub (repo dan pemilik), bukan username, sehingga ganti nama atau username yang diambil orang lain tidak bisa membajak build. Repo yang dipindah ke pemilik lain otomatis ditahan.
+- **Admin** mengikuti `ADMIN_GITHUB_LOGINS` setiap request: login yang dihapus dari daftar langsung kehilangan akses admin.
+- **Kode pengguna di-build di server Dokploy-mu.** Review admin adalah pengaman utama. Gerbang di atas tidak menangkap kode yang dieksekusi saat build dari file biasa (misalnya halaman SSG Astro/Next), jadi build server terpisah tetap sangat disarankan — periksa repo sebelum menyetujui, terutama script `build` dan `postinstall` di `package.json`. Atur `SITE_MEMORY_LIMIT` dan `SITE_CPU_LIMIT`, dan pertimbangkan *build server* terpisah di Dokploy (`DOKPLOY_SERVER_ID`) bila jumlah pengguna bertambah.
 - **Pratinjau** di halaman detail memakai iframe `sandbox="allow-scripts"` tanpa `allow-same-origin`.
 
 ---

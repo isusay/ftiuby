@@ -10,13 +10,13 @@ import { listBranches, listPublicRepos, GitHubError } from "@/lib/github";
 import { runPreflight, BRANCH_RE, REPO_PART_RE, type PreflightResult } from "@/lib/preflight";
 import { normalizeSlug, slugProblem } from "@/lib/slug";
 import { randomSecret } from "@/lib/id";
-import { archiveProject, triggerDeploy } from "@/lib/deploy";
+import { archiveProject, guardedDeploy, resolveProjectRepo, RepoAccessError } from "@/lib/deploy";
 import { CATEGORIES, slotStats } from "@/lib/queries";
 
 export type FormState = { error?: string; ok?: string } | null;
 
 function errMsg(e: unknown) {
-  if (e instanceof AuthError || e instanceof GitHubError) return e.message;
+  if (e instanceof AuthError || e instanceof GitHubError || e instanceof RepoAccessError) return e.message;
   if (e instanceof z.ZodError) return e.issues[0]?.message ?? "Data tidak valid.";
   console.error(e);
   return "Terjadi kesalahan di server. Coba lagi sebentar lagi.";
@@ -84,7 +84,7 @@ export async function loadBranches(repo: string): Promise<{ branches?: string[];
 export async function checkRepo(repo: string, branch: string): Promise<PreflightResult | { error: string }> {
   try {
     const user = await requireActiveUser();
-    return await runPreflight(user.login, repo, branch);
+    return await runPreflight(user.login, repo, branch, { ownerId: user.githubId });
   } catch (e) {
     return { error: errMsg(e) };
   }
@@ -123,7 +123,7 @@ export async function submitProject(_: FormState, form: FormData): Promise<FormS
     if (taken) return { error: `Subdomain ${slug} milik project lamamu. Pakai tombol "Ajukan lagi" di riwayat.` };
 
     // Preflight diulang di server: hasil dari browser tidak dipercaya.
-    const pf = await runPreflight(user.login, data.repo, data.branch);
+    const pf = await runPreflight(user.login, data.repo, data.branch, { ownerId: user.githubId });
     if (!pf.ok || !pf.framework || !pf.outputDir) return { error: pf.errors[0] ?? "Repository belum lolos pemeriksaan." };
 
     await db.insert(projects).values({
@@ -133,6 +133,7 @@ export async function submitProject(_: FormState, form: FormData): Promise<FormS
       category: data.category,
       repoOwner: user.login,
       repoName: data.repo,
+      repoId: pf.repoId,
       branch: data.branch,
       framework: pf.framework,
       outputDir: pf.outputDir,
@@ -158,15 +159,17 @@ async function ownProject(id: string) {
 /** Kirim ulang setelah revisi, atau ajukan lagi project yang diarsipkan. */
 export async function resubmitProject(_: FormState, form: FormData): Promise<FormState> {
   try {
-    const { user, p } = await ownProject(String(form.get("id")));
-    if (p.status !== "NEEDS_REVISION" && p.status !== "ARCHIVED") return { error: "Project ini tidak sedang menunggu revisi." };
-    if (p.status === "ARCHIVED" && (await hasActiveProject(user.id, p.id))) {
+    const { user, p: own } = await ownProject(String(form.get("id")));
+    if (own.status !== "NEEDS_REVISION" && own.status !== "ARCHIVED") return { error: "Project ini tidak sedang menunggu revisi." };
+    if (own.status === "ARCHIVED" && (await hasActiveProject(user.id, own.id))) {
       return { error: "Arsipkan website aktifmu dulu sebelum mengajukan yang ini." };
     }
-    const branch = String(form.get("branch") ?? p.branch);
+    const branch = String(form.get("branch") ?? own.branch);
     if (!BRANCH_RE.test(branch)) return { error: "Nama branch tidak valid." };
 
-    const pf = await runPreflight(p.repoOwner, p.repoName, branch);
+    // Pastikan repo masih milikmu (dicek lewat ID GitHub) dan pakai namanya yang terkini.
+    const p = await resolveProjectRepo(own);
+    const pf = await runPreflight(p.repoOwner, p.repoName, branch, { ownerId: user.githubId });
     if (!pf.ok || !pf.framework || !pf.outputDir) return { error: pf.errors[0] ?? "Repository belum lolos pemeriksaan." };
 
     await db
@@ -177,6 +180,7 @@ export async function resubmitProject(_: FormState, form: FormData): Promise<For
         outputDir: pf.outputDir,
         buildCommand: pf.buildCommand,
         packageManager: pf.packageManager,
+        repoId: pf.repoId,
         status: "SUBMITTED",
       })
       .where(eq(projects.id, p.id));
@@ -192,8 +196,9 @@ export async function redeployProject(_: FormState, form: FormData): Promise<For
     const { p } = await ownProject(String(form.get("id")));
     if (!["LIVE", "FAILED"].includes(p.status) || !p.dokployAppId) return { error: "Project belum disetujui admin." };
     if (p.lastDeployAt && Date.now() - p.lastDeployAt.getTime() < 60_000) return { error: "Tunggu satu menit sebelum build ulang." };
-    await triggerDeploy(p, "Build ulang dari dashboard");
+    const outcome = await guardedDeploy(p, "Build ulang dari dashboard");
     revalidatePath("/dashboard");
+    if ("held" in outcome) return { error: `Build ditahan sampai admin meninjau: ${outcome.reason}` };
     return { ok: "Build ulang dimulai." };
   } catch (e) {
     return { error: errMsg(e) };
