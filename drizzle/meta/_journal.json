@@ -15,6 +15,20 @@
       "when": 1794475973730,
       "tag": "0001_review_gate",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794476621682,
+      "tag": "0002_multi_provider",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794476629933,
+      "tag": "0003_drop_legacy_columns",
+      "breakpoints": true
     }
   ]
 }

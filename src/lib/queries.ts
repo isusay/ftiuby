@@ -1,8 +1,8 @@
 import "server-only";
-import { and, desc, eq, isNotNull, sql, count } from "drizzle-orm";
+import { and, desc, eq, isNotNull, ne, sql, count } from "drizzle-orm";
 import { db } from "./db";
 import { env } from "./env";
-import { projects, users, likes } from "./schema";
+import { projects, users, likes, type User } from "./schema";
 
 export const CATEGORIES = ["Portfolio", "Product", "Editorial", "Tugas Kuliah", "Komunitas", "Game", "Lainnya"] as const;
 
@@ -83,4 +83,14 @@ export async function toggleLike(userId: string, projectId: string): Promise<{ l
       .returning({ likeCount: projects.likeCount });
     return { liked, likeCount: p?.likeCount ?? 0 };
   });
+}
+
+/** Kuota project aktif (belum diarsipkan): override per user dari admin, atau MAX_PROJECTS_PER_USER. */
+export async function projectQuota(user: Pick<User, "id" | "projectLimit">) {
+  const [{ n }] = await db
+    .select({ n: count() })
+    .from(projects)
+    .where(and(eq(projects.userId, user.id), ne(projects.status, "ARCHIVED")));
+  const limit = user.projectLimit ?? env.maxProjectsPerUser;
+  return { used: Number(n), limit, available: Math.max(0, limit - Number(n)) };
 }

@@ -1,9 +1,11 @@
 "use client";
 import { useActionState, useEffect, useState, useTransition } from "react";
-import { checkRepo, loadBranches, loadRepos, submitProject } from "./actions";
+import { checkRepo, checkUpload, loadBranches, loadRepos, submitProject, type RepoOption } from "./actions";
 import type { PreflightResult } from "@/lib/preflight";
+import type { GitProvider } from "@/lib/schema";
 
-type Repo = { name: string; branch: string; description: string | null };
+type Source = GitProvider | "drop";
+export type SourceOption = { id: Source; label: string; linked: boolean };
 
 function toSlug(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 32);
@@ -12,12 +14,22 @@ function toTitle(s: string) {
   return s.replace(/[-_.]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()).slice(0, 60);
 }
 
-export function SubmitForm({ categories, sitesDomain }: { categories: readonly string[]; sitesDomain: string }) {
-  const [repos, setRepos] = useState<Repo[] | null>(null);
+export function SubmitForm({
+  categories,
+  sitesDomain,
+  sources,
+}: {
+  categories: readonly string[];
+  sitesDomain: string;
+  sources: SourceOption[];
+}) {
+  const [source, setSource] = useState<Source>(sources.find((s) => s.linked)?.id ?? "drop");
+  const [repos, setRepos] = useState<RepoOption[] | null>(null);
   const [repoError, setRepoError] = useState<string | null>(null);
   const [repo, setRepo] = useState("");
   const [branches, setBranches] = useState<string[]>([]);
   const [branch, setBranch] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const [pf, setPf] = useState<PreflightResult | null>(null);
   const [pfError, setPfError] = useState<string | null>(null);
   const [slug, setSlug] = useState("");
@@ -25,32 +37,53 @@ export function SubmitForm({ categories, sitesDomain }: { categories: readonly s
   const [description, setDescription] = useState("");
   const [checking, startCheck] = useTransition();
   const [state, formAction, submitting] = useActionState(submitProject, null);
+  const current = sources.find((s) => s.id === source);
 
   useEffect(() => {
-    loadRepos().then((r) => {
+    setRepos(null);
+    setRepo("");
+    setBranch("");
+    setBranches([]);
+    setPf(null);
+    setPfError(null);
+    setRepoError(null);
+    if (source === "drop" || !current?.linked) return;
+    loadRepos(source).then((r) => {
       if (r.error) setRepoError(r.error);
       setRepos(r.repos ?? []);
     });
-  }, []);
+  }, [source, current?.linked]);
 
-  function pickRepo(name: string) {
-    setRepo(name);
+  function pickRepo(path: string) {
+    setRepo(path);
     setPf(null);
     setPfError(null);
     setBranches([]);
-    const r = repos?.find((x) => x.name === name);
-    if (!r) return;
+    const r = repos?.find((x) => x.path === path);
+    if (!r || source === "drop") return;
     setBranch(r.branch);
-    setSlug((s) => s || toSlug(r.name));
-    setTitle((t) => t || toTitle(r.name));
-    setDescription((d) => d || (r.description ?? ""));
-    loadBranches(name).then((b) => setBranches(b.branches ?? [r.branch]));
+    fillDetails(r.name, r.description);
+    loadBranches(source, path).then((b) => setBranches(b.branches ?? [r.branch]));
+  }
+
+  function fillDetails(name: string, desc?: string | null) {
+    setSlug((s) => s || toSlug(name));
+    setTitle((t) => t || toTitle(name));
+    setDescription((d) => d || (desc ?? ""));
   }
 
   function runCheck() {
     startCheck(async () => {
       setPfError(null);
-      const res = await checkRepo(repo, branch);
+      let res: PreflightResult | { error: string };
+      if (source === "drop") {
+        if (!file) return;
+        const fd = new FormData();
+        fd.set("zip", file);
+        res = await checkUpload(fd);
+      } else {
+        res = await checkRepo(source, repo, branch);
+      }
       if ("error" in res) {
         setPf(null);
         setPfError(res.error);
@@ -66,15 +99,61 @@ export function SubmitForm({ categories, sitesDomain }: { categories: readonly s
     );
   }
 
+  const canCheck = source === "drop" ? !!file : !!repo && !!branch;
+
   return (
     <form action={formAction} className="space-y-8">
+      <input type="hidden" name="source" value={source} />
       <fieldset className="space-y-4">
-        <legend className="text-xl font-bold mb-2">Pilih repository</legend>
-        {repos === null ? (
-          <p className="text-muted">Mengambil repository public dari GitHub…</p>
+        <legend className="text-xl font-bold mb-2">Sumber kode</legend>
+        <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Sumber kode">
+          {sources.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              role="radio"
+              aria-checked={source === s.id}
+              onClick={() => setSource(s.id)}
+              className={`btn btn-sm ${source === s.id ? "btn-primary" : "btn-ghost"}`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        {source === "drop" ? (
+          <div>
+            <label htmlFor="zip" className="lbl">File ZIP (maks. 25 MB)</label>
+            <input
+              id="zip"
+              name="zip"
+              type="file"
+              accept=".zip,application/zip"
+              required
+              className="field"
+              onChange={(e) => {
+                const f = e.target.files?.[0] ?? null;
+                setFile(f);
+                setPf(null);
+                setPfError(null);
+                if (f) fillDetails(f.name.replace(/\.zip$/i, ""));
+              }}
+            />
+            <p className="text-sm text-muted mt-1">
+              Isi ZIP: website statis (ada <span className="font-mono">index.html</span>) atau source Vite/Astro/Next export/Nuxt/SvelteKit
+              lengkap dengan <span className="font-mono">package.json</span> dan lockfile. Jangan sertakan <span className="font-mono">node_modules</span>.
+            </p>
+          </div>
+        ) : !current?.linked ? (
+          <p className="text-muted">
+            Akun {current?.label} belum terhubung.{" "}
+            <a href={`/api/auth/${source}?link=1`} className="underline underline-offset-2 font-semibold">Hubungkan sekarang</a>
+          </p>
+        ) : repos === null ? (
+          <p className="text-muted">Mengambil repository public dari {current.label}…</p>
         ) : repos.length === 0 ? (
           <p className="text-muted">
-            {repoError ?? "Belum ada repository public di akun GitHub-mu. Buat atau jadikan public dulu, lalu muat ulang halaman ini."}
+            {repoError ?? `Belum ada repository public milikmu di ${current.label}. Buat atau jadikan public dulu, lalu muat ulang halaman ini.`}
           </p>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2">
@@ -83,7 +162,7 @@ export function SubmitForm({ categories, sitesDomain }: { categories: readonly s
               <select id="repo" name="repo" value={repo} onChange={(e) => pickRepo(e.target.value)} className="field" required>
                 <option value="">Pilih…</option>
                 {repos.map((r) => (
-                  <option key={r.name} value={r.name}>{r.name}</option>
+                  <option key={r.path} value={r.path}>{r.path}</option>
                 ))}
               </select>
             </div>
@@ -108,8 +187,9 @@ export function SubmitForm({ categories, sitesDomain }: { categories: readonly s
             </div>
           </div>
         )}
-        <button type="button" onClick={runCheck} disabled={!repo || !branch || checking} className="btn btn-ghost">
-          {checking ? "Memeriksa repository…" : "Periksa repository"}
+
+        <button type="button" onClick={runCheck} disabled={!canCheck || checking} className="btn btn-ghost">
+          {checking ? "Memeriksa…" : source === "drop" ? "Periksa ZIP" : "Periksa repository"}
         </button>
         {pfError && <p role="alert" className="text-danger">{pfError}</p>}
         {pf && (
@@ -120,7 +200,7 @@ export function SubmitForm({ categories, sitesDomain }: { categories: readonly s
             </p>
             {pf.outputDir && (
               <p className="text-sm text-muted">
-                Folder hasil: <span className="font-mono">{pf.outputDir === "." ? "root repository" : pf.outputDir}</span>
+                Folder hasil: <span className="font-mono">{pf.outputDir === "." ? "folder utama" : pf.outputDir}</span>
                 {pf.buildCommand && <> · Perintah build: <span className="font-mono">{pf.buildCommand}</span></>}
               </p>
             )}

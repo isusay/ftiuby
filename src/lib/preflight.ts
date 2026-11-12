@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { getRepo, getSnapshot, getFileText, GitHubError, type TreeEntry } from "./github";
-import type { Framework } from "./schema";
+import { GitError, gitHost, isValidRepoPath, type FileEntry } from "./git";
+import type { Framework, GitProvider } from "./schema";
 
 export type PreflightResult = {
   ok: boolean;
@@ -29,8 +29,7 @@ export const FRAMEWORK_LABEL: Record<Framework, string> = {
   SVELTEKIT: "SvelteKit static",
 };
 
-export const BRANCH_RE = /^[a-zA-Z0-9._\-/]{1,100}$/;
-export const REPO_PART_RE = /^[a-zA-Z0-9._-]{1,100}$/;
+export const BRANCH_RE = /^(?!.*\.\.)(?!\/)[a-zA-Z0-9._\-/]{1,100}$/;
 
 const BACKEND_DEPS = [
   "express", "fastify", "koa", "@nestjs/core", "hapi", "@hapi/hapi", "socket.io",
@@ -73,65 +72,86 @@ export function isBuildFile(path: string) {
   return BUILD_FILE_RE.test(path);
 }
 
-export function fingerprintTree(tree: TreeEntry[], truncated: boolean): string | null {
+export function fingerprintFiles(files: FileEntry[], truncated: boolean): string | null {
   if (truncated) return null;
-  const lines = tree
-    .filter((t) => t.type === "blob" && isBuildFile(t.path))
+  const lines = files
+    .filter((t) => isBuildFile(t.path))
     .map((t) => `${t.path}\0${t.sha}`)
     .sort();
   return createHash("sha256").update(lines.join("\n")).digest("hex");
 }
 
-/** Fingerprint file build pada HEAD branch saat ini. */
-export async function currentFingerprint(owner: string, repo: string, branch: string) {
-  const snap = await getSnapshot(owner, repo, branch);
-  return { commitSha: snap.commitSha, fingerprint: fingerprintTree(snap.tree, snap.truncated) };
+/** Fingerprint file build pada HEAD branch repo git saat ini. */
+export async function currentFingerprint(provider: GitProvider, path: string, branch: string) {
+  const snap = await gitHost(provider).snapshot(path, branch);
+  return { commitSha: snap.commitSha, fingerprint: fingerprintFiles(snap.files, snap.truncated) };
 }
 
-export async function runPreflight(
-  owner: string,
-  repo: string,
-  branch: string,
-  opts: { ownerId?: number } = {},
-): Promise<PreflightResult> {
-  if (!REPO_PART_RE.test(owner) || !REPO_PART_RE.test(repo)) return fail(["Nama repository tidak valid."]);
-  if (!BRANCH_RE.test(branch)) return fail(["Nama branch hanya boleh huruf, angka, titik, garis bawah, strip, dan garis miring."]);
+/** Isi sumber kode yang diperiksa: dari repo git atau dari ZIP. */
+export type SourceView = {
+  files: FileEntry[];
+  truncated: boolean;
+  hasSubmodules: boolean;
+  read(path: string): Promise<string | null>;
+};
 
-  const errors: string[] = [];
-  const warnings: string[] = [];
+/** Preflight repo git: cek kepemilikan & visibilitas, lalu analisis isi branch. */
+export async function runPreflight(
+  provider: GitProvider,
+  path: string,
+  branch: string,
+  opts: { ownerId?: string } = {},
+): Promise<PreflightResult> {
+  if (!isValidRepoPath(provider, path)) return fail(["Nama repository tidak valid."]);
+  if (!BRANCH_RE.test(branch)) return fail(["Nama branch hanya boleh huruf, angka, titik, garis bawah, strip, dan garis miring."]);
+  const host = gitHost(provider);
 
   let repoId: number;
   try {
-    const info = await getRepo(owner, repo);
+    const info = await host.getRepo(path);
     if (info.private) return fail(["Repository harus public."]);
-    if (opts.ownerId !== undefined && info.owner.id !== opts.ownerId) {
-      return fail(["Repository ini bukan milik akun GitHub-mu."]);
+    if (opts.ownerId !== undefined && info.ownerId !== opts.ownerId) {
+      return fail([`Repository ini bukan milik akun ${host.label}-mu (repo organisasi/grup belum didukung).`]);
     }
     repoId = info.id;
   } catch (e) {
-    return fail([e instanceof GitHubError ? e.message : "Gagal menghubungi GitHub."]);
+    return fail([e instanceof GitError ? e.message : `Gagal menghubungi ${host.label}.`]);
   }
 
   let snap;
   try {
-    snap = await getSnapshot(owner, repo, branch);
+    snap = await host.snapshot(path, branch);
   } catch (e) {
-    return fail([e instanceof GitHubError ? e.message : "Gagal membaca isi repository."]);
+    return fail([e instanceof GitError ? e.message : "Gagal membaca isi repository."]);
   }
-  const tree = snap;
   const commitSha = snap.commitSha;
-  const fingerprint = fingerprintTree(snap.tree, snap.truncated);
-  if (snap.truncated) {
-    warnings.push("Repository terlalu besar untuk diperiksa penuh; setiap update akan menunggu tinjauan admin.");
-  }
-  // Baca file dari commit yang sama dengan daftar file di atas.
-  const read = (path: string) => getFileText(owner, repo, commitSha, path);
+  const result = await analyzeSource({
+    files: snap.files,
+    truncated: snap.truncated,
+    hasSubmodules: snap.hasSubmodules,
+    // Baca file dari commit yang sama dengan daftar file.
+    read: (file) => host.readFile(path, commitSha, file),
+  });
+  return { ...result, repoId, commitSha };
+}
 
-  const files = new Set(tree.tree.filter((t) => t.type === "blob").map((t) => t.path));
+/** Deteksi framework & validasi struktur dari daftar file (sumber apa pun). */
+export async function analyzeSource(src: SourceView): Promise<PreflightResult> {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const fingerprint = fingerprintFiles(src.files, src.truncated);
+  if (src.truncated) {
+    warnings.push("Sumber kode terlalu besar untuk diperiksa penuh; setiap update akan menunggu tinjauan admin.");
+  }
+  const read = src.read;
+  const repoId = null;
+  const commitSha = null;
+
+  const files = new Set(src.files.map((t) => t.path));
   const rootFiles = [...files].filter((p) => !p.includes("/"));
   const has = (p: string) => files.has(p);
 
-  if (tree.tree.some((t) => t.type === "commit")) {
+  if (src.hasSubmodules) {
     warnings.push("Repository memakai git submodule; submodule tidak ikut di-clone.");
   }
 
@@ -146,7 +166,7 @@ export async function runPreflight(
   // HTML statis murni.
   if (!has("package.json")) {
     if (!has("index.html")) {
-      return fail([...errors, "Tidak ada index.html di root repository dan tidak ada package.json."], warnings);
+      return fail([...errors, "Tidak ada index.html di folder utama dan tidak ada package.json."], warnings);
     }
     return {
       ok: errors.length === 0, framework: "HTML", frameworkLabel: FRAMEWORK_LABEL.HTML,

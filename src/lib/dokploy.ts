@@ -132,6 +132,29 @@ export const dokploy = {
   deploy: (applicationId: string, title: string) =>
     call("POST", "application.deploy", { applicationId, title }),
 
+  /** Deploy dari file ZIP (sumber "Drop" di Dokploy). Dokploy mengekstrak lalu build sesuai tipe build. */
+  async dropDeploy(applicationId: string, zip: Uint8Array, filename: string) {
+    const form = new FormData();
+    form.set("applicationId", applicationId);
+    form.set("zip", new Blob([new Uint8Array(zip)], { type: "application/zip" }), filename);
+    const res = await fetch(`${env.dokployUrl}/api/application.dropDeployment`, {
+      method: "POST",
+      headers: { "x-api-key": env.dokployApiKey, Accept: "application/json" },
+      body: form,
+      cache: "no-store",
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let msg = `HTTP ${res.status}`;
+      try {
+        msg = (JSON.parse(text) as { message?: string }).message ?? msg;
+      } catch {}
+      throw new DokployError(`Dokploy application.dropDeployment: ${msg}`, res.status);
+    }
+    return true;
+  },
+
   stop: (applicationId: string) => call("POST", "application.stop", { applicationId }),
 
   delete: (applicationId: string) => call("POST", "application.delete", { applicationId }),

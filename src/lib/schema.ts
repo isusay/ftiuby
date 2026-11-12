@@ -6,6 +6,8 @@ import {
   timestamp,
   primaryKey,
   index,
+  uniqueIndex,
+  customType,
 } from "drizzle-orm/pg-core";
 import { createId } from "./id";
 
@@ -37,15 +39,58 @@ export const frameworkEnum = pgEnum("framework", [
 
 export const users = pgTable("users", {
   id: text("id").primaryKey().$defaultFn(createId),
-  githubId: integer("github_id").notNull().unique(),
-  // Tidak unique: username GitHub bisa berpindah tangan setelah pemilik lamanya ganti nama.
-  // Identitas yang dipegang adalah githubId.
+  // Nama tampilan (username dari akun pertama). Identitas sebenarnya ada di tabel accounts.
   login: text("login").notNull(),
   name: text("name"),
   avatarUrl: text("avatar_url"),
   role: roleEnum("role").notNull().default("USER"),
   activatedAt: timestamp("activated_at", { withTimezone: true }),
   inviteId: text("invite_id"),
+  /** Kuota project aktif khusus user ini; null = pakai MAX_PROJECTS_PER_USER. */
+  projectLimit: integer("project_limit"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Provider login & sumber repository. "drop" = upload ZIP (tanpa akun). */
+export const GIT_PROVIDERS = ["github", "gitlab"] as const;
+export type GitProvider = (typeof GIT_PROVIDERS)[number];
+export type SourceProvider = GitProvider | "drop";
+
+/** Akun provider yang terhubung ke satu user. Satu user bisa punya GitHub dan GitLab sekaligus. */
+export const accounts = pgTable(
+  "accounts",
+  {
+    id: text("id").primaryKey().$defaultFn(createId),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider").$type<GitProvider>().notNull(),
+    /** ID numerik akun di provider (disimpan sebagai teks). Identitas yang dipegang. */
+    providerAccountId: text("provider_account_id").notNull(),
+    /** Username terkini di provider (cache, bisa berubah). */
+    login: text("login").notNull(),
+    avatarUrl: text("avatar_url"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("accounts_provider_account_idx").on(t.provider, t.providerAccountId),
+    uniqueIndex("accounts_user_provider_idx").on(t.userId, t.provider),
+  ],
+);
+
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({ dataType: () => "bytea" });
+
+/** File ZIP yang diunggah untuk project bersumber "drop" (sudah dinormalisasi). */
+export const uploads = pgTable("uploads", {
+  id: text("id").primaryKey().$defaultFn(createId),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  data: bytea("data").notNull(),
+  size: integer("size").notNull(),
+  fileCount: integer("file_count").notNull(),
+  sha256: text("sha256").notNull(),
+  fingerprint: text("fingerprint"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -68,11 +113,17 @@ export const projects = pgTable(
     title: text("title").notNull(),
     description: text("description").notNull(),
     category: text("category").notNull().default("Portfolio"),
-    repoOwner: text("repo_owner").notNull(),
-    repoName: text("repo_name").notNull(),
-    /** ID numerik repo GitHub; repoOwner/repoName hanya cache nama terkini. */
+    /** github | gitlab | drop */
+    provider: text("provider").$type<SourceProvider>().notNull().default("github"),
+    /** Path repo di provider, misal "alice/web" atau "grup/sub/web" (cache nama terkini). */
+    repoPath: text("repo_path"),
+    /** Project drop: ZIP yang sedang/terakhir tayang, dan ZIP baru yang menunggu tinjauan. */
+    uploadId: text("upload_id"),
+    pendingUploadId: text("pending_upload_id"),
+    /** ID numerik repo di provider; repoPath hanya cache nama terkini. Null untuk drop. */
     repoId: integer("repo_id"),
-    branch: text("branch").notNull(),
+    /** Null untuk project drop. */
+    branch: text("branch"),
     framework: frameworkEnum("framework").notNull(),
     outputDir: text("output_dir").notNull(),
     buildCommand: text("build_command"),

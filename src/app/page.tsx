@@ -17,7 +17,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ k
     <>
       <section className="mx-auto max-w-6xl px-4 pt-14 pb-16 sm:pt-20">
         <p className="text-lg text-muted mb-5 max-w-[46ch]">
-          Hosting gratis untuk website statis karya mahasiswa. Hubungkan repository GitHub, kami build, dan situsmu tayang di
+          Hosting gratis untuk website statis karya mahasiswa. Hubungkan repository GitHub atau GitLab (atau unggah ZIP), kami build, dan situsmu tayang di
         </p>
         <SubdomainComposer domain={env.sitesDomain} />
         <p className="mt-6 text-muted">
@@ -34,8 +34,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ k
       <section className="border-y border-line bg-surface/70">
         <ol className="mx-auto max-w-6xl px-4 py-10 grid gap-8 sm:grid-cols-3">
           {[
-            ["Hubungkan repository", "Masuk dengan GitHub dan pilih repository public berisi website-mu."],
-            ["Cek otomatis & review", "Sistem membaca struktur repo, lalu admin meninjau sebelum build."],
+            ["Hubungkan repository", "Masuk dengan GitHub atau GitLab, pilih repository public, atau unggah ZIP website-mu."],
+            ["Cek otomatis & review", "Sistem membaca struktur kodenya, lalu admin meninjau sebelum build."],
             ["Tayang di subdomain", "Situsmu live di nama.ftiuby.cloud dan ikut tampil di galeri."],
           ].map(([t, d], i) => (
             <li key={t} className="flex gap-4">

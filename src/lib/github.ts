@@ -4,11 +4,8 @@ import { env } from "./env";
 const API = process.env.GITHUB_API_URL ?? "https://api.github.com";
 const RAW = process.env.GITHUB_RAW_URL ?? "https://raw.githubusercontent.com";
 
-export class GitHubError extends Error {
-  constructor(message: string, public status: number) {
-    super(message);
-  }
-}
+export { GitError as GitHubError } from "./git/error";
+import { GitError as GitHubError } from "./git/error";
 
 async function gh<T>(path: string, token?: string): Promise<T> {
   const auth = token ?? env.githubToken;

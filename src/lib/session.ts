@@ -4,7 +4,8 @@ import { SignJWT, jwtVerify } from "jose";
 import { eq } from "drizzle-orm";
 import { env } from "./env";
 import { db } from "./db";
-import { users, type User } from "./schema";
+import { accounts, users, type User } from "./schema";
+import { isAdminIdentity } from "./oauth";
 
 /**
  * Cookie memakai prefix __Host- di production: wajib Secure, Path=/, tanpa Domain.
@@ -51,9 +52,12 @@ export async function getCurrentUser(): Promise<User | null> {
     if (!payload.sub) return null;
     const user = await db.query.users.findFirst({ where: eq(users.id, payload.sub) });
     if (!user) return null;
-    // Admin yang dihapus dari ADMIN_GITHUB_LOGINS langsung kehilangan akses,
+    // Admin yang dihapus dari ADMIN_LOGINS langsung kehilangan akses,
     // tanpa menunggu sesinya (30 hari) habis atau login ulang.
-    if (user.role === "ADMIN" && !env.adminLogins.includes(user.login.toLowerCase())) {
+    if (
+      user.role === "ADMIN" &&
+      !isAdminIdentity(await db.query.accounts.findMany({ where: eq(accounts.userId, user.id) }))
+    ) {
       await db.update(users).set({ role: "USER" }).where(eq(users.id, user.id));
       return { ...user, role: "USER" };
     }

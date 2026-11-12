@@ -1,14 +1,31 @@
 import "server-only";
-import { eq } from "drizzle-orm";
+import { and, eq, notInArray } from "drizzle-orm";
 import { db } from "./db";
 import { env } from "./env";
-import { projects, users, type Project } from "./schema";
+import { accounts, projects, uploads, type GitProvider, type Project } from "./schema";
 import { dokploy, DokployError, type BuildConfig } from "./dokploy";
-import { getRepo, getRepoById, GitHubError, type GhRepo } from "./github";
+import { GitError, gitHost, type RepoInfo } from "./git";
 import { currentFingerprint, runPreflight, type PreflightResult } from "./preflight";
+import { inspectStoredZip } from "./archive";
 
 export function siteUrl(slug: string) {
   return `https://${slug}.${env.sitesDomain}`;
+}
+
+export type GitProject = Project & { provider: GitProvider; repoPath: string; branch: string };
+
+export function isGitProject(p: Project): p is GitProject {
+  return p.provider !== "drop" && !!p.repoPath && !!p.branch;
+}
+
+/** Label sumber untuk ditampilkan: "GitHub · alice/web@main" atau "Upload ZIP". */
+export function sourceLabel(p: Project) {
+  return isGitProject(p) ? `${gitHost(p.provider).label} · ${p.repoPath}@${p.branch}` : "Upload ZIP";
+}
+
+/** Link ke kode sumber di provider (null untuk upload ZIP). */
+export function sourceUrl(p: Project) {
+  return isGitProject(p) ? gitHost(p.provider).treeUrl(p.repoPath, p.branch) : null;
 }
 
 function buildConfigFor(p: Project): BuildConfig {
@@ -26,16 +43,16 @@ function buildEnvFor(p: Project): string {
 }
 
 /**
- * Dipanggil saat admin menyetujui: buat aplikasi di Dokploy, hubungkan repo,
- * pasang domain nama.ftiuby.cloud, lalu jalankan deploy pertama.
+ * Dipanggil saat admin menyetujui/meninjau: buat aplikasi di Dokploy bila belum ada,
+ * pasang domain nama.ftiuby.cloud, simpan sumber (repo git atau ZIP) & tipe build, lalu deploy.
  */
 export async function provisionProject(p: Project, title = "Deploy pertama setelah disetujui") {
   let appId = p.dokployAppId;
   if (!appId) {
     const app = await dokploy.createApplication(
-      `${p.slug} (${p.repoOwner})`,
+      `${p.slug}`,
       `site-${p.slug}`.slice(0, 63),
-      `ftiuby: ${p.repoOwner}/${p.repoName}@${p.branch}`,
+      `ftiuby: ${sourceLabel(p)}`.slice(0, 200),
     );
     appId = app.applicationId;
     await db.update(projects).set({ dokployAppId: appId }).where(eq(projects.id, p.id));
@@ -48,11 +65,30 @@ export async function provisionProject(p: Project, title = "Deploy pertama setel
     }
   }
 
-  await dokploy.saveGitProvider(appId, `https://github.com/${p.repoOwner}/${p.repoName}.git`, p.branch);
+  if (isGitProject(p)) {
+    await dokploy.saveGitProvider(appId, gitHost(p.provider).cloneUrl(p.repoPath), p.branch);
+  }
   await dokploy.saveBuildType(appId, buildConfigFor(p));
   await dokploy.saveEnvironment(appId, buildEnvFor(p));
   await dokploy.setLimits(appId);
   await triggerDeploy({ ...p, dokployAppId: appId }, title);
+}
+
+/** Jalankan deploy di Dokploy: git → tarik branch; drop → kirim ZIP yang sudah ditinjau (uploadId). */
+export async function triggerDeploy(p: Project, title: string) {
+  if (!p.dokployAppId) throw new Error("Project belum terhubung ke Dokploy.");
+  if (isGitProject(p)) {
+    await dokploy.deploy(p.dokployAppId, title);
+  } else {
+    if (!p.uploadId) throw new Error("Project belum punya file ZIP.");
+    const up = await db.query.uploads.findFirst({ where: eq(uploads.id, p.uploadId) });
+    if (!up) throw new Error("File ZIP project tidak ditemukan.");
+    await dokploy.dropDeploy(p.dokployAppId, up.data, `${p.slug}.zip`);
+  }
+  await db
+    .update(projects)
+    .set({ deployState: "queued", lastDeployAt: new Date() })
+    .where(eq(projects.id, p.id));
 }
 
 /* ---------- Identitas repo & gerbang review ---------- */
@@ -60,59 +96,70 @@ export async function provisionProject(p: Project, title = "Deploy pertama setel
 export class RepoAccessError extends Error {}
 
 /**
- * Pastikan repo project masih ada, public, dan dimiliki akun GitHub pemilik project
- * (dicek lewat ID numerik, bukan username). Cache repoOwner/repoName diperbarui bila
- * repo atau pemiliknya ganti nama.
+ * Pastikan repo project masih ada, public, dan dimiliki akun provider yang terhubung ke pemilik
+ * project (dicek lewat ID numerik, bukan username). Cache repoPath diperbarui bila repo atau
+ * pemiliknya ganti nama.
  */
-export async function resolveProjectRepo(p: Project): Promise<Project> {
-  const owner = await db.query.users.findFirst({ where: eq(users.id, p.userId) });
-  if (!owner) throw new RepoAccessError("Pemilik project tidak ditemukan.");
+export async function resolveProjectRepo(p: GitProject): Promise<GitProject> {
+  const host = gitHost(p.provider);
+  const account = await db.query.accounts.findFirst({
+    where: and(eq(accounts.userId, p.userId), eq(accounts.provider, p.provider)),
+  });
+  if (!account) throw new RepoAccessError(`Akun ${host.label} pemilik project sudah tidak terhubung.`);
 
-  let info: GhRepo;
+  let info: RepoInfo;
   try {
-    info = p.repoId ? await getRepoById(p.repoId) : await getRepo(p.repoOwner, p.repoName);
+    info = p.repoId ? await host.getRepoById(p.repoId) : await host.getRepo(p.repoPath);
   } catch (e) {
-    if (e instanceof GitHubError && e.status === 404) {
+    if (e instanceof GitError && e.status === 404) {
       throw new RepoAccessError("Repository tidak ditemukan atau sudah tidak public.");
     }
     throw e;
   }
   if (info.private) throw new RepoAccessError("Repository sudah tidak public.");
-  if (info.owner.id !== owner.githubId) {
-    throw new RepoAccessError(`Repository ${info.full_name} bukan lagi milik @${owner.login}.`);
+  if (info.ownerId !== account.providerAccountId) {
+    throw new RepoAccessError(`Repository ${info.path} bukan lagi milik @${account.login} di ${host.label}.`);
   }
-  if (info.id === p.repoId && info.owner.login === p.repoOwner && info.name === p.repoName) return p;
+  if (info.id === p.repoId && info.path === p.repoPath) return p;
 
   const [updated] = await db
     .update(projects)
-    .set({ repoId: info.id, repoOwner: info.owner.login, repoName: info.name })
+    .set({ repoId: info.id, repoPath: info.path })
     .where(eq(projects.id, p.id))
     .returning();
-  return updated ?? p;
+  return (updated ?? p) as GitProject;
 }
 
 /**
- * Tinjauan admin: verifikasi kepemilikan repo lalu jalankan preflight pada isi branch saat ini.
- * Hasilnya (termasuk fingerprint) disimpan oleh pemanggil sebagai versi yang sudah ditinjau.
+ * Tinjauan admin: periksa sumber yang akan dipublish.
+ * Git → verifikasi kepemilikan lalu preflight isi branch saat ini.
+ * Drop → preflight ZIP yang menunggu (pendingUploadId), atau ZIP saat ini.
  */
-export async function reviewRepo(p: Project): Promise<{ project: Project; pf: PreflightResult }> {
-  const project = await resolveProjectRepo(p);
-  const pf = await runPreflight(project.repoOwner, project.repoName, project.branch);
-  if (pf.ok && pf.repoId !== project.repoId) {
-    pf.ok = false;
-    pf.errors.push("Repository berubah saat diperiksa. Coba lagi.");
+export async function reviewSource(p: Project): Promise<{ project: Project; pf: PreflightResult; uploadId: string | null }> {
+  if (isGitProject(p)) {
+    const project = await resolveProjectRepo(p);
+    const pf = await runPreflight(project.provider, project.repoPath, project.branch);
+    if (pf.ok && pf.repoId !== project.repoId) {
+      pf.ok = false;
+      pf.errors.push("Repository berubah saat diperiksa. Coba lagi.");
+    }
+    return { project, pf, uploadId: null };
   }
-  return { project, pf };
+  const uploadId = p.pendingUploadId ?? p.uploadId;
+  const up = uploadId ? await db.query.uploads.findFirst({ where: eq(uploads.id, uploadId) }) : null;
+  if (!up) throw new RepoAccessError("File ZIP project tidak ditemukan. Minta developer mengunggah ulang.");
+  return { project: p, pf: await inspectStoredZip(up.data), uploadId: up.id };
 }
 
-/** Kolom project yang diperbarui dari hasil tinjauan. */
-export function reviewedFields(pf: PreflightResult) {
+/** Kolom project yang diperbarui setelah admin meninjau sumber. */
+export function reviewedFields(pf: PreflightResult, uploadId: string | null) {
   return {
     framework: pf.framework!,
     outputDir: pf.outputDir!,
     buildCommand: pf.buildCommand,
     packageManager: pf.packageManager,
-    repoId: pf.repoId,
+    ...(pf.repoId ? { repoId: pf.repoId } : {}),
+    ...(uploadId ? { uploadId, pendingUploadId: null } : {}),
     reviewedFingerprint: pf.fingerprint,
     reviewedCommit: pf.commitSha,
     reviewHeldAt: null,
@@ -122,25 +169,40 @@ export function reviewedFields(pf: PreflightResult) {
 
 export type DeployOutcome = { deployed: true } | { held: true; reason: string };
 
-async function hold(p: Project, reason: string): Promise<DeployOutcome> {
+async function hold(p: Project, reason: string, extra: Partial<Project> = {}): Promise<DeployOutcome> {
   await db
     .update(projects)
-    .set({ reviewHeldAt: p.reviewHeldAt ?? new Date(), reviewHeldReason: reason })
+    .set({ reviewHeldAt: p.reviewHeldAt ?? new Date(), reviewHeldReason: reason, ...extra })
     .where(eq(projects.id, p.id));
   return { held: true, reason };
 }
 
+const CHANGED = "File build (package.json, lockfile, atau file konfigurasi) berubah sejak terakhir ditinjau.";
+
 /**
- * Deploy yang dipicu developer (push webhook / tombol Build ulang).
- * Kode di-build di server kita, jadi deploy hanya jalan otomatis bila file yang menentukan
- * proses install/build sama persis dengan versi yang terakhir ditinjau admin.
- * Jika berbeda, update ditahan dan muncul di tab "Tertahan" admin.
+ * Apakah perubahan boleh di-deploy tanpa admin? Kode di-build di server kita, jadi hanya bila
+ * file yang menentukan install/build sama persis dengan yang terakhir ditinjau.
+ * HTML statis disajikan Nginx apa adanya tanpa menjalankan kode, jadi selalu aman.
+ */
+function gateReason(p: Project, framework: Project["framework"], fingerprint: string | null): string | null {
+  if (p.framework === "HTML" && framework === "HTML") return null;
+  if (framework !== p.framework) return "Jenis framework berubah sejak terakhir ditinjau.";
+  if (!p.reviewedFingerprint) return "Project ini belum punya data tinjauan file build. Admin perlu meninjau sekali.";
+  if (!fingerprint) return "Sumber kode terlalu besar untuk diperiksa otomatis.";
+  if (fingerprint !== p.reviewedFingerprint) return CHANGED;
+  return null;
+}
+
+/**
+ * Deploy repo git yang dipicu developer (push webhook / tombol Build ulang).
+ * Jika file build berubah, update ditahan dan muncul di tab "Update tertahan" admin.
  */
 export async function guardedDeploy(p: Project, title: string): Promise<DeployOutcome> {
   if (!p.dokployAppId) throw new Error("Project belum terhubung ke Dokploy.");
+  if (!isGitProject(p)) throw new Error("Project ini bersumber dari upload ZIP.");
   if (p.reviewHeldAt) return { held: true, reason: p.reviewHeldReason ?? "Update menunggu tinjauan admin." };
 
-  let fresh: Project;
+  let fresh: GitProject;
   try {
     fresh = await resolveProjectRepo(p);
   } catch (e) {
@@ -148,34 +210,47 @@ export async function guardedDeploy(p: Project, title: string): Promise<DeployOu
     throw e;
   }
 
-  // HTML statis disajikan Nginx apa adanya tanpa menjalankan kode, jadi aman di-deploy otomatis.
   if (fresh.framework !== "HTML") {
-    const { fingerprint } = await currentFingerprint(fresh.repoOwner, fresh.repoName, fresh.branch);
-    if (!fresh.reviewedFingerprint) {
-      return hold(fresh, "Project ini belum punya data tinjauan file build. Admin perlu meninjau sekali.");
-    }
-    if (!fingerprint) {
-      return hold(fresh, "Repository terlalu besar untuk diperiksa otomatis.");
-    }
-    if (fingerprint !== fresh.reviewedFingerprint) {
-      return hold(fresh, "File build (package.json, lockfile, atau file konfigurasi) berubah sejak terakhir ditinjau.");
-    }
+    const { fingerprint } = await currentFingerprint(fresh.provider, fresh.repoPath, fresh.branch);
+    const reason = gateReason(fresh, fresh.framework, fingerprint);
+    if (reason) return hold(fresh, reason);
   }
 
-  if (fresh.repoOwner !== p.repoOwner || fresh.repoName !== p.repoName) {
-    await dokploy.saveGitProvider(fresh.dokployAppId!, `https://github.com/${fresh.repoOwner}/${fresh.repoName}.git`, fresh.branch);
+  if (fresh.repoPath !== p.repoPath) {
+    await dokploy.saveGitProvider(fresh.dokployAppId!, gitHost(fresh.provider).cloneUrl(fresh.repoPath), fresh.branch);
   }
   await triggerDeploy(fresh, title);
   return { deployed: true };
 }
 
-export async function triggerDeploy(p: Pick<Project, "id" | "dokployAppId">, title: string) {
+/**
+ * Developer mengunggah ZIP versi baru untuk project drop yang sudah tayang.
+ * Lolos gerbang → langsung di-deploy; tidak → disimpan sebagai pendingUploadId untuk ditinjau admin.
+ */
+export async function deployNewUpload(p: Project, uploadId: string, pf: PreflightResult): Promise<DeployOutcome> {
   if (!p.dokployAppId) throw new Error("Project belum terhubung ke Dokploy.");
-  await dokploy.deploy(p.dokployAppId, title);
-  await db
+  const reason = p.reviewHeldAt ? (p.reviewHeldReason ?? CHANGED) : gateReason(p, pf.framework!, pf.fingerprint);
+  if (reason) return hold(p, reason, { pendingUploadId: uploadId });
+
+  const [updated] = await db
     .update(projects)
-    .set({ deployState: "queued", lastDeployAt: new Date() })
-    .where(eq(projects.id, p.id));
+    .set({ uploadId, pendingUploadId: null })
+    .where(eq(projects.id, p.id))
+    .returning();
+  await triggerDeploy(updated, "Upload ZIP baru");
+  return { deployed: true };
+}
+
+/** Hapus ZIP milik user yang tidak lagi dipakai project mana pun. */
+export async function pruneUploads(userId: string) {
+  const refs = await db
+    .select({ a: projects.uploadId, b: projects.pendingUploadId })
+    .from(projects)
+    .where(eq(projects.userId, userId));
+  const keep = refs.flatMap((r) => [r.a, r.b]).filter((x): x is string => !!x);
+  await db
+    .delete(uploads)
+    .where(keep.length ? and(eq(uploads.userId, userId), notInArray(uploads.id, keep)) : eq(uploads.userId, userId));
 }
 
 /**
@@ -228,6 +303,15 @@ export async function archiveProject(p: Project) {
   }
   await db
     .update(projects)
-    .set({ status: "ARCHIVED", dokployAppId: null, deployState: null, liveAt: null, reviewHeldAt: null, reviewHeldReason: null })
+    .set({
+      status: "ARCHIVED",
+      dokployAppId: null,
+      deployState: null,
+      liveAt: null,
+      reviewHeldAt: null,
+      reviewHeldReason: null,
+      pendingUploadId: null,
+    })
     .where(eq(projects.id, p.id));
+  if (p.provider === "drop") await pruneUploads(p.userId);
 }

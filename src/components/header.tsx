@@ -29,7 +29,7 @@ export async function Header() {
               <span className="max-w-[10ch] truncate">{user.login}</span>
             </Link>
           ) : (
-            <a href="/api/auth/github" className="btn btn-ghost btn-sm">Masuk</a>
+            <a href="/dashboard" className="btn btn-ghost btn-sm">Masuk</a>
           )}
           <Link href="/dashboard" className="btn btn-primary btn-sm hidden sm:inline-flex">Publish web</Link>
         </div>
