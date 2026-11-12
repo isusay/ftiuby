@@ -19,7 +19,7 @@ export function LikeButton({
 
   function onClick() {
     if (!canLike) {
-      window.location.href = "/api/auth/github";
+      window.location.href = "/dashboard";
       return;
     }
     start(async () => {

@@ -1,19 +1,24 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import { db } from "@/lib/db";
 import { invites, projects, users } from "@/lib/schema";
 import { AuthError, requireAdmin } from "@/lib/session";
-import { archiveProject, provisionProject, syncProject, triggerDeploy } from "@/lib/deploy";
+import {
+  archiveProject, provisionProject, pruneUploads, RepoAccessError, reviewedFields, reviewSource, syncProject,
+} from "@/lib/deploy";
 import { dokploy, DokployError } from "@/lib/dokploy";
-import { runPreflight } from "@/lib/preflight";
+import { GitError } from "@/lib/git";
+import { ArchiveError } from "@/lib/archive";
 
 type State = { error?: string; ok?: string } | null;
 
 function errMsg(e: unknown) {
-  if (e instanceof AuthError || e instanceof DokployError) return e.message;
+  if (e instanceof AuthError || e instanceof DokployError || e instanceof GitError || e instanceof RepoAccessError || e instanceof ArchiveError) {
+    return e.message;
+  }
   console.error(e);
   return e instanceof Error ? e.message : "Terjadi kesalahan.";
 }
@@ -34,10 +39,27 @@ function done() {
 export async function approveProject(_: State, form: FormData): Promise<State> {
   try {
     const p = await loadProject(form);
-    if (p.status !== "SUBMITTED") return { error: "Hanya pengajuan berstatus Menunggu review yang bisa disetujui." };
 
-    // Cek ulang repo saat disetujui: isi repo bisa berubah sejak diajukan.
-    const pf = await runPreflight(p.repoOwner, p.repoName, p.branch);
+    // Klaim pengajuan secara atomik: kalau dua admin menekan "Setujui" bersamaan,
+    // hanya satu yang lolos sehingga aplikasi Dokploy tidak dibuat dua kali.
+    const [claimed] = await db
+      .update(projects)
+      .set({ status: "BUILDING", adminNote: null })
+      .where(and(eq(projects.id, p.id), eq(projects.status, "SUBMITTED")))
+      .returning();
+    if (!claimed) return { error: "Pengajuan ini sudah diproses atau bukan berstatus Menunggu review." };
+
+    // Cek ulang sumber saat disetujui: isi repo (dan pemiliknya) bisa berubah sejak diajukan.
+    let review;
+    try {
+      review = await reviewSource(claimed);
+    } catch (e) {
+      const note = e instanceof RepoAccessError ? e.message : `Pemeriksaan gagal: ${errMsg(e)}`;
+      await db.update(projects).set({ status: e instanceof RepoAccessError ? "NEEDS_REVISION" : "SUBMITTED", adminNote: note }).where(eq(projects.id, p.id));
+      done();
+      return { error: note };
+    }
+    const { pf, uploadId } = review;
     if (!pf.ok || !pf.framework || !pf.outputDir) {
       await db
         .update(projects)
@@ -49,14 +71,7 @@ export async function approveProject(_: State, form: FormData): Promise<State> {
 
     const [fresh] = await db
       .update(projects)
-      .set({
-        status: "BUILDING",
-        adminNote: null,
-        framework: pf.framework,
-        outputDir: pf.outputDir,
-        buildCommand: pf.buildCommand,
-        packageManager: pf.packageManager,
-      })
+      .set(reviewedFields(pf, uploadId))
       .where(eq(projects.id, p.id))
       .returning();
     try {
@@ -89,13 +104,25 @@ export async function requestRevision(_: State, form: FormData): Promise<State> 
   }
 }
 
+/**
+ * Admin meninjau isi repo saat ini lalu build ulang. Fingerprint file build disimpan sebagai
+ * versi yang sudah ditinjau, dan update yang tertahan dilepas.
+ * Periksa perubahan di GitHub (link "Lihat perubahan") sebelum menekan tombol ini.
+ */
 export async function adminRedeploy(_: State, form: FormData): Promise<State> {
   try {
     const p = await loadProject(form);
     if (!p.dokployAppId) return { error: "Project belum punya aplikasi di Dokploy." };
-    await triggerDeploy(p, "Build ulang oleh admin");
+    const { project, pf, uploadId } = await reviewSource(p);
+    if (!pf.ok || !pf.framework || !pf.outputDir) {
+      return { error: `Sumber tidak lolos pemeriksaan: ${pf.errors.join(" ")} Minta revisi ke developer.` };
+    }
+    const [fresh] = await db.update(projects).set(reviewedFields(pf, uploadId)).where(eq(projects.id, project.id)).returning();
+    // provisionProject menyimpan ulang sumber, tipe build & env (bisa berubah), lalu deploy.
+    await provisionProject(fresh, "Build ulang setelah ditinjau admin");
+    if (fresh.provider === "drop") await pruneUploads(fresh.userId);
     done();
-    return { ok: "Build ulang dimulai." };
+    return { ok: "Ditinjau dan build ulang dimulai." };
   } catch (e) {
     return { error: errMsg(e) };
   }
@@ -175,6 +202,25 @@ export async function toggleUserActive(_: State, form: FormData): Promise<State>
     await db.update(users).set({ activatedAt: u.activatedAt ? null : new Date() }).where(eq(users.id, id));
     revalidatePath("/admin");
     return { ok: u.activatedAt ? "Akun dinonaktifkan." : "Akun diaktifkan." };
+  } catch (e) {
+    return { error: errMsg(e) };
+  }
+}
+
+/** Ubah kuota project aktif seorang user (kosong = kembali ke default MAX_PROJECTS_PER_USER). */
+export async function setUserLimit(_: State, form: FormData): Promise<State> {
+  try {
+    await requireAdmin();
+    const id = String(form.get("id"));
+    const raw = String(form.get("limit") ?? "").trim();
+    const limit = raw === "" ? null : Number(raw);
+    if (limit !== null && (!Number.isInteger(limit) || limit < 0 || limit > 100)) {
+      return { error: "Kuota harus angka 0–100, atau kosong untuk default." };
+    }
+    const [u] = await db.update(users).set({ projectLimit: limit }).where(eq(users.id, id)).returning({ id: users.id });
+    if (!u) return { error: "Pengguna tidak ditemukan." };
+    revalidatePath("/admin");
+    return { ok: limit === null ? "Kuota kembali ke default." : `Kuota diubah menjadi ${limit}.` };
   } catch (e) {
     return { error: errMsg(e) };
   }

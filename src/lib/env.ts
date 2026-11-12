@@ -19,11 +19,28 @@ export const env = {
     if (s.length < 32) throw new Error("SESSION_SECRET minimal 32 karakter");
     return s;
   },
+  /** OAuth GitHub; provider aktif bila client ID & secret diisi. */
   get githubClientId() {
-    return req("GITHUB_CLIENT_ID");
+    return process.env.GITHUB_CLIENT_ID || null;
   },
   get githubClientSecret() {
-    return req("GITHUB_CLIENT_SECRET");
+    return process.env.GITHUB_CLIENT_SECRET || null;
+  },
+  /** OAuth GitLab (gitlab.com atau GITLAB_URL); provider aktif bila client ID & secret diisi. */
+  get gitlabClientId() {
+    return process.env.GITLAB_CLIENT_ID || null;
+  },
+  get gitlabClientSecret() {
+    return process.env.GITLAB_CLIENT_SECRET || null;
+  },
+  /** Upload ZIP (Drop) aktif kecuali ENABLE_DROP=false. */
+  get dropEnabled() {
+    return process.env.ENABLE_DROP !== "false";
+  },
+  /** Batas project aktif (belum diarsipkan) per user, bisa ditimpa admin per user. */
+  get maxProjectsPerUser() {
+    const n = Number(process.env.MAX_PROJECTS_PER_USER ?? 3);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 3;
   },
   /** Token opsional (tanpa scope) agar limit GitHub API naik dari 60 ke 5000/jam. */
   get githubToken() {
@@ -41,11 +58,19 @@ export const env = {
   get dokployServerId() {
     return process.env.DOKPLOY_SERVER_ID || null;
   },
-  get adminLogins(): string[] {
-    return (process.env.ADMIN_GITHUB_LOGINS ?? "")
-      .split(",")
+  /**
+   * Identitas admin dalam bentuk "provider:login", dari ADMIN_LOGINS
+   * (misal "github:alice,gitlab:bob"; tanpa prefix = github) dan ADMIN_GITHUB_LOGINS (lama).
+   */
+  get adminIdentities(): string[] {
+    const list = [
+      ...(process.env.ADMIN_LOGINS ?? "").split(","),
+      ...(process.env.ADMIN_GITHUB_LOGINS ?? "").split(",").map((s) => (s.trim() ? `github:${s.trim()}` : "")),
+    ];
+    return list
       .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
+      .filter(Boolean)
+      .map((s) => (s.includes(":") ? s : `github:${s}`));
   },
   get betaSlots() {
     return Number(process.env.BETA_SLOTS ?? 25);

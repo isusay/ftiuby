@@ -50,11 +50,11 @@ export default function Rules() {
         <section id="syarat" className="scroll-mt-24">
           <h2 className="text-3xl font-extrabold mb-4">Syarat</h2>
           <ul className="space-y-3 list-disc pl-5">
-            <li><strong>Akun GitHub</strong> yang memiliki repository-nya.</li>
-            <li><strong>Repository public.</strong> Server kami meng-clone repo tanpa akses ke akunmu.</li>
+            <li><strong>Akun GitHub atau GitLab</strong> untuk login. Keduanya bisa dihubungkan ke satu akun ftiuby.</li>
+            <li><strong>Repository public milikmu sendiri</strong> (bukan milik organisasi/grup), atau <strong>file ZIP</strong> berisi website-mu (maks. 25 MB, tanpa <span className="font-mono">node_modules</span>).</li>
             <li><strong>Website statis.</strong> Tidak butuh server, database, atau API yang berjalan di backend.</li>
             <li><strong>Kode undangan</strong> untuk mengaktifkan akun selama masa beta.</li>
-            <li>Satu developer memiliki <strong>satu website aktif</strong>. Situs yang diarsipkan tidak memakai slot.</li>
+            <li>Setiap developer punya <strong>kuota beberapa website aktif</strong> (lihat di dashboard). Situs yang diarsipkan tidak memakai kuota.</li>
           </ul>
         </section>
 
@@ -94,8 +94,8 @@ export default function Rules() {
           <h2 className="text-3xl font-extrabold mb-4">Langkah publish</h2>
           <ol className="space-y-5">
             {[
-              ["Masuk ke Dashboard", "Login dengan GitHub, lalu masukkan kode undangan jika akunmu belum aktif."],
-              ["Pilih repository dan branch", "Daftar repository public-mu muncul otomatis. Pilih branch yang berisi versi final."],
+              ["Masuk ke Dashboard", "Login dengan GitHub atau GitLab, lalu masukkan kode undangan jika akunmu belum aktif."],
+              ["Pilih sumber kode", "Pilih repository dan branch dari GitHub/GitLab (daftarnya muncul otomatis), atau unggah file ZIP."],
               ["Cek hasil pemeriksaan", "Sistem mendeteksi framework, folder output, dan masalah struktur sebelum kamu mengirim."],
               ["Tunggu review dan build", "Setelah admin menyetujui, server membangun situsmu di container terisolasi."],
               ["Bagikan alamatmu", `Saat status Live, situsmu terbuka di nama-pilihanmu.${d}.`],
@@ -115,13 +115,17 @@ export default function Rules() {
           <h2 className="text-3xl font-extrabold mb-4">Update otomatis saat push</h2>
           <p className="mb-3">
             Setelah situsmu disetujui, dashboard menampilkan <strong>alamat webhook</strong> dan <strong>secret</strong>.
-            Pasang sekali di GitHub dan setiap push ke branch produksi akan membangun ulang situsmu:
+            Pasang sekali dan setiap push ke branch produksi akan membangun ulang situsmu:
           </p>
           <ol className="list-decimal pl-5 space-y-1.5 mb-3">
-            <li>Buka repository → Settings → Webhooks → Add webhook.</li>
-            <li>Isi Payload URL dan Secret dari dashboard. Content type: <span className="font-mono">application/json</span>.</li>
-            <li>Pilih &quot;Just the push event&quot;, lalu simpan.</li>
+            <li><strong>GitHub:</strong> repository → Settings → Webhooks → Add webhook. Isi Payload URL dan Secret, content type <span className="font-mono">application/json</span>, pilih &quot;Just the push event&quot;.</li>
+            <li><strong>GitLab:</strong> project → Settings → Webhooks → Add new webhook. Isi URL dan Secret token, centang &quot;Push events&quot;.</li>
+            <li><strong>Upload ZIP:</strong> unggah versi baru dari dashboard.</li>
           </ol>
+          <p className="text-muted mb-2">
+            Perubahan isi halaman langsung tayang. Perubahan <span className="font-mono">package.json</span>, lockfile, atau file
+            konfigurasi build ditinjau admin dulu, karena kode tersebut dijalankan di server kami.
+          </p>
           <p className="text-muted">Kalau build versi baru gagal, versi lama tetap tayang.</p>
         </section>
 
@@ -164,7 +168,7 @@ export default function Rules() {
             <div>
               <h3 className="text-lg font-bold mb-1">Masih butuh bantuan?</h3>
               <p className="text-muted">
-                Hubungi admin dengan menyertakan URL repository dan branch. Jangan pernah mengirim token atau password ke siapa pun.
+                Hubungi admin dengan menyertakan URL repository dan branch (atau nama subdomain untuk upload ZIP). Jangan pernah mengirim token atau password ke siapa pun.
               </p>
             </div>
           </div>
@@ -172,7 +176,7 @@ export default function Rules() {
 
         <div className="panel p-8">
           <h2 className="text-3xl font-extrabold mb-2">Siap publish?</h2>
-          <p className="text-muted mb-5">Mulai dari repository GitHub yang sudah rapi.</p>
+          <p className="text-muted mb-5">Mulai dari repository GitHub/GitLab atau file ZIP yang sudah rapi.</p>
           <Link href="/dashboard" className="btn btn-primary">Buka dashboard</Link>
         </div>
       </div>

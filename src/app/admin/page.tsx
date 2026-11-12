@@ -1,25 +1,28 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { desc, eq, inArray, count } from "drizzle-orm";
+import { desc, eq, inArray, isNotNull, count } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { env } from "@/lib/env";
-import { invites, projects, users, type ProjectStatus } from "@/lib/schema";
+import { accounts, invites, projects, users, type Project, type ProjectStatus } from "@/lib/schema";
 import { getCurrentUser } from "@/lib/session";
 import { FRAMEWORK_LABEL } from "@/lib/preflight";
 import { slotStats } from "@/lib/queries";
+import { isGitProject, sourceLabel, sourceUrl } from "@/lib/deploy";
+import { gitHost } from "@/lib/git";
 import { StatusBadge } from "@/components/status-badge";
 import { ActionForm } from "@/components/action-form";
 import {
   adminArchive, adminRedeploy, adminSync, approveProject, createInvite,
-  deleteInvite, requestRevision, toggleUserActive,
+  deleteInvite, requestRevision, setUserLimit, toggleUserActive,
 } from "./actions";
 import { DokployCheck } from "./dokploy-check";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin — ftiuby" };
 
-const TABS: { key: string; label: string; statuses: ProjectStatus[] }[] = [
+const TABS: { key: string; label: string; statuses: ProjectStatus[]; held?: boolean }[] = [
   { key: "antrean", label: "Antrean", statuses: ["SUBMITTED"] },
+  { key: "tertahan", label: "Update tertahan", statuses: [], held: true },
   { key: "proses", label: "Build & gagal", statuses: ["BUILDING", "FAILED"] },
   { key: "live", label: "Live", statuses: ["LIVE"] },
   { key: "revisi", label: "Perlu revisi", statuses: ["NEEDS_REVISION"] },
@@ -33,7 +36,9 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
   const current = TABS.find((t) => t.key === tab) ?? TABS[0];
 
   const counts = await db.select({ status: projects.status, n: count() }).from(projects).groupBy(projects.status);
-  const countOf = (s: ProjectStatus[]) => counts.filter((c) => s.includes(c.status)).reduce((a, c) => a + Number(c.n), 0);
+  const [{ held }] = await db.select({ held: count() }).from(projects).where(isNotNull(projects.reviewHeldAt));
+  const countOf = (t: (typeof TABS)[number]) =>
+    t.held ? Number(held) : counts.filter((c) => t.statuses.includes(c.status)).reduce((a, c) => a + Number(c.n), 0);
   const slots = await slotStats();
 
   return (
@@ -63,11 +68,11 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
                 href={`/admin?view=project&tab=${t.key}`}
                 className={`px-3 py-2 -mb-px border-b-2 ${t.key === current.key ? "border-accent font-semibold" : "border-transparent text-muted hover:text-ink"}`}
               >
-                {t.label} <span className="text-muted">({countOf(t.statuses)})</span>
+                {t.label} <span className="text-muted">({countOf(t)})</span>
               </Link>
             ))}
           </nav>
-          <ProjectList statuses={current.statuses} />
+          <ProjectList statuses={current.statuses} held={current.held} />
         </>
       )}
       {view === "invite" && <Invites />}
@@ -77,12 +82,12 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
   );
 }
 
-async function ProjectList({ statuses }: { statuses: ProjectStatus[] }) {
+async function ProjectList({ statuses, held }: { statuses: ProjectStatus[]; held?: boolean }) {
   const rows = await db
     .select({ p: projects, login: users.login })
     .from(projects)
     .innerJoin(users, eq(users.id, projects.userId))
-    .where(inArray(projects.status, statuses))
+    .where(held ? isNotNull(projects.reviewHeldAt) : inArray(projects.status, statuses))
     .orderBy(desc(projects.updatedAt))
     .limit(100);
 
@@ -103,17 +108,37 @@ async function ProjectList({ statuses }: { statuses: ProjectStatus[] }) {
           <dl className="flex flex-wrap gap-x-6 gap-y-1 text-sm mb-4">
             <div><dt className="inline text-muted">Pemilik </dt><dd className="inline font-semibold">@{login}</dd></div>
             <div>
-              <dt className="inline text-muted">Repo </dt>
+              <dt className="inline text-muted">Sumber </dt>
               <dd className="inline">
-                <a className="font-mono underline underline-offset-2" href={`https://github.com/${p.repoOwner}/${p.repoName}/tree/${p.branch}`} target="_blank" rel="noopener noreferrer">
-                  {p.repoOwner}/{p.repoName}@{p.branch}
-                </a>
+                {sourceUrl(p) ? (
+                  <a className="font-mono underline underline-offset-2" href={sourceUrl(p)!} target="_blank" rel="noopener noreferrer">
+                    {sourceLabel(p)}
+                  </a>
+                ) : (
+                  <>
+                    <span className="font-mono">{sourceLabel(p)}</span>
+                    {p.uploadId && (
+                      <> · <a className="underline underline-offset-2" href={`/api/uploads/${p.uploadId}`}>unduh ZIP</a></>
+                    )}
+                  </>
+                )}
               </dd>
             </div>
             <div><dt className="inline text-muted">Framework </dt><dd className="inline">{FRAMEWORK_LABEL[p.framework]} → <span className="font-mono">{p.outputDir}</span></dd></div>
             <div><dt className="inline text-muted">Deploy </dt><dd className="inline">{p.deployState ?? "—"}</dd></div>
           </dl>
           {p.adminNote && <p className="text-sm text-muted mb-4 whitespace-pre-line">Catatan: {p.adminNote}</p>}
+          {p.reviewHeldAt && (
+            <div className="mb-4 rounded-lg border-l-4 border-danger bg-paper p-4 text-sm">
+              <p className="font-semibold mb-1">Update ditahan sejak {p.reviewHeldAt.toLocaleString("id-ID")}</p>
+              <p className="mb-2">{p.reviewHeldReason}</p>
+              <p className="text-muted">
+                Periksa perubahannya, terutama <span className="font-mono">scripts</span>, dependency baru, dan file konfigurasi
+                {" "}sebelum menekan &quot;Tinjau &amp; build ulang&quot;.{" "}
+                <ReviewLink p={p} />
+              </p>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-start gap-4">
             {p.status === "SUBMITTED" && (
@@ -131,7 +156,14 @@ async function ProjectList({ statuses }: { statuses: ProjectStatus[] }) {
             )}
             {p.dokployAppId && (
               <>
-                <ActionForm action={adminRedeploy} hidden={{ id: p.id }} label="Build ulang" />
+                <ActionForm
+                  action={adminRedeploy}
+                  hidden={{ id: p.id }}
+                  label={p.reviewHeldAt ? "Tinjau & build ulang" : "Build ulang"}
+                  pendingLabel="Memeriksa repo…"
+                  variant={p.reviewHeldAt ? "primary" : undefined}
+                  confirm={p.reviewHeldAt ? "Sudah memeriksa perubahan file build? Kode ini akan dijalankan di server saat build." : undefined}
+                />
                 <ActionForm action={adminSync} hidden={{ id: p.id }} label="Cek status" />
               </>
             )}
@@ -142,6 +174,24 @@ async function ProjectList({ statuses }: { statuses: ProjectStatus[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+function ReviewLink({ p }: { p: Project }) {
+  if (isGitProject(p)) {
+    const host = gitHost(p.provider);
+    const href = p.reviewedCommit ? host.compareUrl(p.repoPath, p.reviewedCommit, p.branch) : host.commitsUrl(p.repoPath, p.branch);
+    return (
+      <a className="underline underline-offset-2" href={href} target="_blank" rel="noopener noreferrer">
+        Lihat perubahan di {host.label}
+      </a>
+    );
+  }
+  return (
+    <>
+      {p.pendingUploadId && <a className="underline underline-offset-2" href={`/api/uploads/${p.pendingUploadId}`}>Unduh ZIP baru</a>}
+      {p.uploadId && <> · <a className="underline underline-offset-2" href={`/api/uploads/${p.uploadId}`}>ZIP yang tayang</a></>}
+    </>
   );
 }
 
@@ -195,22 +245,51 @@ async function Invites() {
 
 async function Users() {
   const list = await db.select().from(users).orderBy(desc(users.createdAt)).limit(200);
+  const accts = await db.select().from(accounts).where(inArray(accounts.userId, list.length ? list.map((u) => u.id) : [""]));
+  const used = await db
+    .select({ userId: projects.userId, n: count() })
+    .from(projects)
+    .where(inArray(projects.status, ["SUBMITTED", "NEEDS_REVISION", "BUILDING", "LIVE", "FAILED"]))
+    .groupBy(projects.userId);
   return (
     <div className="panel overflow-x-auto">
+      <p className="p-3 text-sm text-muted border-b border-line">Kuota default: {env.maxProjectsPerUser} project aktif per pengguna (MAX_PROJECTS_PER_USER).</p>
       <table className="w-full text-left text-[0.95rem]">
         <thead className="border-b border-line">
-          <tr><th className="p-3">Pengguna</th><th className="p-3">Peran</th><th className="p-3">Status</th><th className="p-3">Bergabung</th><th className="p-3"></th></tr>
+          <tr><th className="p-3">Pengguna</th><th className="p-3">Akun</th><th className="p-3">Peran</th><th className="p-3">Status</th><th className="p-3">Project / kuota</th><th className="p-3"></th></tr>
         </thead>
         <tbody>
           {list.map((u) => (
-            <tr key={u.id} className="border-b border-line last:border-0">
+            <tr key={u.id} className="border-b border-line last:border-0 align-top">
               <td className="p-3">
-                <a href={`https://github.com/${u.login}`} target="_blank" rel="noopener noreferrer" className="font-semibold hover:underline">@{u.login}</a>
+                <span className="font-semibold">@{u.login}</span>
                 {u.name && <span className="text-muted"> · {u.name}</span>}
+                <div className="text-sm text-muted">Bergabung {u.createdAt.toLocaleDateString("id-ID")}</div>
+              </td>
+              <td className="p-3 text-sm">
+                {accts.filter((a) => a.userId === u.id).map((a) => (
+                  <div key={a.id}>{gitHost(a.provider).label}: @{a.login}</div>
+                ))}
               </td>
               <td className="p-3">{u.role === "ADMIN" ? "Admin" : "Developer"}</td>
               <td className="p-3">{u.activatedAt ? "Aktif" : "Belum aktif"}</td>
-              <td className="p-3">{u.createdAt.toLocaleDateString("id-ID")}</td>
+              <td className="p-3">
+                <ActionForm action={setUserLimit} hidden={{ id: u.id }} label="Simpan">
+                  <label className="text-sm">
+                    {Number(used.find((x) => x.userId === u.id)?.n ?? 0)} /{" "}
+                    <input
+                      name="limit"
+                      type="number"
+                      min={0}
+                      max={100}
+                      defaultValue={u.projectLimit ?? ""}
+                      placeholder={String(env.maxProjectsPerUser)}
+                      className="field inline-block w-20 py-1"
+                      aria-label={`Kuota project @${u.login}`}
+                    />
+                  </label>
+                </ActionForm>
+              </td>
               <td className="p-3">
                 {u.role !== "ADMIN" && (
                   <ActionForm action={toggleUserActive} hidden={{ id: u.id }} label={u.activatedAt ? "Nonaktifkan" : "Aktifkan"} variant={u.activatedAt ? "danger" : "ghost"} />

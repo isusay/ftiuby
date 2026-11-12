@@ -3,7 +3,8 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { projects, users, likes } from "@/lib/schema";
 import { getCurrentUser } from "@/lib/session";
-import { siteUrl } from "@/lib/deploy";
+import { siteUrl, sourceLabel, sourceUrl } from "@/lib/deploy";
+import { gitHost } from "@/lib/git";
 import { FRAMEWORK_LABEL } from "@/lib/preflight";
 import { LikeButton } from "@/components/like-button";
 
@@ -35,6 +36,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ slug: 
     ? !!(await db.query.likes.findFirst({ where: and(eq(likes.userId, user.id), eq(likes.projectId, p.id)) }))
     : false;
   const url = siteUrl(p.slug);
+  const code = sourceUrl(p);
 
   return (
     <article className="mx-auto max-w-6xl px-4 py-12">
@@ -44,9 +46,11 @@ export default async function ProjectPage({ params }: { params: Promise<{ slug: 
 
       <div className="flex flex-wrap items-center gap-3 mb-10">
         <a href={url} target="_blank" rel="noopener noreferrer" className="btn btn-primary">Buka situs</a>
-        <a href={`https://github.com/${p.repoOwner}/${p.repoName}`} target="_blank" rel="noopener noreferrer" className="btn btn-ghost">
-          Lihat kode di GitHub
-        </a>
+        {code && (
+          <a href={code} target="_blank" rel="noopener noreferrer" className="btn btn-ghost">
+            Lihat kode di {gitHost(p.provider).label}
+          </a>
+        )}
         <LikeButton projectId={p.id} initialLiked={liked} initialCount={p.likeCount} canLike={!!user && user.id !== p.userId} />
       </div>
 
@@ -84,8 +88,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ slug: 
             <dd className="font-semibold mt-1">{FRAMEWORK_LABEL[p.framework]}</dd>
           </div>
           <div>
-            <dt className="text-muted text-sm">Repository</dt>
-            <dd className="font-mono text-sm mt-1 break-all">{p.repoOwner}/{p.repoName} · {p.branch}</dd>
+            <dt className="text-muted text-sm">Sumber</dt>
+            <dd className="font-mono text-sm mt-1 break-all">{sourceLabel(p)}</dd>
           </div>
           {p.liveAt && (
             <div>

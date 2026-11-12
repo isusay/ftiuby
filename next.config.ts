@@ -3,6 +3,8 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
+  // Upload ZIP (Drop) dikirim lewat server action; batas file 25 MB + ruang untuk field form.
+  experimental: { serverActions: { bodySizeLimit: "26mb" } },
   images: { remotePatterns: [{ protocol: "https", hostname: "avatars.githubusercontent.com" }] },
   async headers() {
     return [

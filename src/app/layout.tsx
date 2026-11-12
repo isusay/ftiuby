@@ -4,10 +4,10 @@ import { Header } from "@/components/header";
 
 export const metadata: Metadata = {
   title: "ftiuby — Publish karya web mahasiswa",
-  description: "Galeri dan hosting gratis untuk website statis karya komunitas ftiuby. Dari repository GitHub ke nama.ftiuby.cloud.",
+  description: "Galeri dan hosting gratis untuk website statis karya komunitas ftiuby. Dari repository GitHub/GitLab atau file ZIP ke nama.ftiuby.cloud.",
   openGraph: {
     title: "ftiuby — Publish karya web mahasiswa",
-    description: "Dari repository GitHub ke nama.ftiuby.cloud, gratis.",
+    description: "Dari repository GitHub/GitLab atau file ZIP ke nama.ftiuby.cloud, gratis.",
     locale: "id_ID",
     siteName: "ftiuby",
     type: "website",
