@@ -12,10 +12,11 @@ import { gitHost } from "@/lib/git";
 import { StatusBadge } from "@/components/status-badge";
 import { ActionForm } from "@/components/action-form";
 import {
-  adminArchive, adminRedeploy, adminSync, approveProject, createInvite,
+  adminArchive, adminFetchLog, adminRedeploy, adminSync, approveProject, createInvite,
   deleteInvite, requestRevision, setUserLimit, toggleUserActive,
 } from "./actions";
 import { DokployCheck } from "./dokploy-check";
+import { BuildFailure } from "@/components/build-failure";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Admin — ftiuby" };
@@ -128,6 +129,7 @@ async function ProjectList({ statuses, held }: { statuses: ProjectStatus[]; held
             <div><dt className="inline text-muted">Deploy </dt><dd className="inline">{p.deployState ?? "—"}</dd></div>
           </dl>
           {p.adminNote && <p className="text-sm text-muted mb-4 whitespace-pre-line">Catatan: {p.adminNote}</p>}
+          <BuildFailure p={p} refresh={adminFetchLog} audience="admin" />
           {p.reviewHeldAt && (
             <div className="mb-4 rounded-lg border-l-4 border-danger bg-paper p-4 text-sm">
               <p className="font-semibold mb-1">Update ditahan sejak {p.reviewHeldAt.toLocaleString("id-ID")}</p>

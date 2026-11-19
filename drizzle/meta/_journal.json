@@ -29,6 +29,13 @@
       "when": 1794476629933,
       "tag": "0003_drop_legacy_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795088013591,
+      "tag": "0004_deploy_log",
+      "breakpoints": true
     }
   ]
 }

@@ -7,7 +7,7 @@ import { db } from "@/lib/db";
 import { invites, projects, users } from "@/lib/schema";
 import { AuthError, requireAdmin } from "@/lib/session";
 import {
-  archiveProject, provisionProject, pruneUploads, RepoAccessError, reviewedFields, reviewSource, syncProject,
+  archiveProject, provisionProject, pruneUploads, refreshFailureLog, RepoAccessError, reviewedFields, reviewSource, syncProject,
 } from "@/lib/deploy";
 import { dokploy, DokployError } from "@/lib/dokploy";
 import { GitError } from "@/lib/git";
@@ -134,6 +134,17 @@ export async function adminSync(_: State, form: FormData): Promise<State> {
     const s = await syncProject({ ...p, deployState: p.deployState === "done" || p.deployState === "error" ? "running" : p.deployState });
     done();
     return { ok: `Status: ${s.status} (${s.deployState ?? "—"})` };
+  } catch (e) {
+    return { error: errMsg(e) };
+  }
+}
+
+export async function adminFetchLog(_: State, form: FormData): Promise<State> {
+  try {
+    const p = await loadProject(form);
+    const fresh = await refreshFailureLog(p);
+    revalidatePath("/admin");
+    return fresh.deployLog ? { ok: "Log terbaru diambil." } : { error: "Dokploy belum menyediakan log untuk project ini." };
   } catch (e) {
     return { error: errMsg(e) };
   }

@@ -132,6 +132,9 @@ export const projects = pgTable(
     adminNote: text("admin_note"),
     dokployAppId: text("dokploy_app_id"),
     deployState: text("deploy_state"), // idle | running | done | error
+    /** Potongan akhir log build terakhir yang gagal (dari Dokploy), untuk ditampilkan & didiagnosis. */
+    deployLog: text("deploy_log"),
+    deployErrorAt: timestamp("deploy_error_at", { withTimezone: true }),
     webhookSecret: text("webhook_secret").notNull(),
     /** Fingerprint file build saat terakhir ditinjau admin; deploy otomatis hanya jika masih sama. */
     reviewedFingerprint: text("reviewed_fingerprint"),

@@ -7,6 +7,7 @@ import { dokploy, DokployError, type BuildConfig } from "./dokploy";
 import { GitError, gitHost, type RepoInfo } from "./git";
 import { currentFingerprint, runPreflight, type PreflightResult } from "./preflight";
 import { inspectStoredZip } from "./archive";
+import { cleanLog } from "./build-diagnosis";
 
 export function siteUrl(slug: string) {
   return `https://${slug}.${env.sitesDomain}`;
@@ -277,18 +278,57 @@ export async function syncProject(p: Project): Promise<Project> {
     patch.deployState = "running";
   } else if (state === "done" && settled) {
     patch.deployState = "done";
+    patch.deployLog = null;
+    patch.deployErrorAt = null;
     if (p.status !== "LIVE") {
       patch.status = "LIVE";
       patch.liveAt = p.liveAt ?? new Date();
     }
   } else if (state === "error" && settled) {
     patch.deployState = "error";
+    // Simpan penyebabnya supaya admin & developer tahu kenapa gagal dan harus apa.
+    const log = await fetchFailureLog(p.dokployAppId).catch(() => null);
+    patch.deployLog = log;
+    patch.deployErrorAt = new Date();
     // Kalau pernah live, versi lama tetap melayani; status tetap LIVE.
     if (!p.liveAt) patch.status = "FAILED";
   }
 
   if (Object.keys(patch).length === 0) return p;
   const [updated] = await db.update(projects).set(patch).where(eq(projects.id, p.id)).returning();
+  return updated ?? p;
+}
+
+/**
+ * Ambil log deploy terbaru dari Dokploy: pesan error + potongan akhir log build.
+ * Mengembalikan null bila Dokploy tidak menyediakan log (misalnya tidak ada deploy).
+ */
+export async function fetchFailureLog(applicationId: string): Promise<string | null> {
+  const list = await dokploy.deployments(applicationId);
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const latest = [...list].sort((a, b) => Date.parse(b.createdAt ?? "") - Date.parse(a.createdAt ?? ""))[0];
+  let logs = "";
+  try {
+    logs = (await dokploy.readLogs(latest.deploymentId)) ?? "";
+  } catch {
+    // Versi Dokploy lama tanpa readLogs: cukup pakai errorMessage.
+  }
+  const text = [latest.errorMessage ? `Pesan error Dokploy: ${latest.errorMessage}` : "", typeof logs === "string" ? logs : ""]
+    .filter(Boolean)
+    .join("\n");
+  const cleaned = cleanLog(text);
+  return cleaned || null;
+}
+
+/** Ambil ulang log kegagalan terakhir (tombol admin/developer). */
+export async function refreshFailureLog(p: Project): Promise<Project> {
+  if (!p.dokployAppId) return p;
+  const log = await fetchFailureLog(p.dokployAppId);
+  const [updated] = await db
+    .update(projects)
+    .set({ deployLog: log, deployErrorAt: log ? (p.deployErrorAt ?? new Date()) : p.deployErrorAt })
+    .where(eq(projects.id, p.id))
+    .returning();
   return updated ?? p;
 }
 
