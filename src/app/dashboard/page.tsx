@@ -13,8 +13,9 @@ import { InviteForm } from "./invite-form";
 import { SubmitForm, type SourceOption } from "./submit-form";
 import { StatusPoller } from "./status-poller";
 import { CopyField } from "./copy-field";
+import { BuildFailure } from "@/components/build-failure";
 import {
-  archiveOwnProject, redeployProject, resubmitProject, unlinkAccount, uploadNewVersion,
+  archiveOwnProject, fetchOwnLog, redeployProject, resubmitProject, unlinkAccount, uploadNewVersion,
 } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -232,6 +233,7 @@ function ProjectPanel({ p }: { p: Project }) {
         </dl>
 
         <StatusMessage p={p} building={building} />
+        {!building && <BuildFailure p={p} refresh={fetchOwnLog} audience="developer" />}
 
         {p.reviewHeldAt && (
           <div className="mt-4 rounded-lg border-l-4 border-danger bg-paper p-4">

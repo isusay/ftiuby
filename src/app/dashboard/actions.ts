@@ -13,7 +13,7 @@ import { ArchiveError, MAX_ZIP_BYTES, prepareUpload, type PreparedUpload } from 
 import { normalizeSlug, slugProblem } from "@/lib/slug";
 import { randomSecret } from "@/lib/id";
 import {
-  archiveProject, deployNewUpload, guardedDeploy, isGitProject, pruneUploads, resolveProjectRepo,
+  archiveProject, deployNewUpload, guardedDeploy, isGitProject, pruneUploads, refreshFailureLog, resolveProjectRepo,
   RepoAccessError, triggerDeploy,
 } from "@/lib/deploy";
 import { syncUserFromAccounts } from "@/lib/auth-flow";
@@ -358,6 +358,18 @@ export async function uploadNewVersion(_: FormState, form: FormData): Promise<Fo
     revalidatePath("/dashboard");
     if ("held" in outcome) return { ok: `Upload diterima dan menunggu tinjauan admin: ${outcome.reason}` };
     return { ok: "Upload diterima. Build dimulai." };
+  } catch (e) {
+    return { error: errMsg(e) };
+  }
+}
+
+export async function fetchOwnLog(_: FormState, form: FormData): Promise<FormState> {
+  try {
+    const { p } = await ownProject(String(form.get("id")));
+    if (!p.dokployAppId) return { error: "Project belum dibuild." };
+    const fresh = await refreshFailureLog(p);
+    revalidatePath("/dashboard");
+    return fresh.deployLog ? { ok: "Log terbaru diambil." } : { error: "Log belum tersedia. Coba lagi sebentar lagi." };
   } catch (e) {
     return { error: errMsg(e) };
   }

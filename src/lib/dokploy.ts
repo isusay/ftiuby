@@ -43,6 +43,14 @@ export type DokployApp = {
   refreshToken?: string | null;
 };
 
+export type DokployDeployment = {
+  deploymentId: string;
+  title?: string | null;
+  status?: "running" | "done" | "error" | "idle" | string | null;
+  errorMessage?: string | null;
+  createdAt?: string | null;
+};
+
 export type BuildConfig =
   | { kind: "static" }
   | { kind: "nixpacks"; publishDirectory: string; isStaticSpa: boolean };
@@ -73,6 +81,13 @@ export const dokploy = {
   },
 
   getApplication: (applicationId: string) => call<DokployApp>("GET", "application.one", { applicationId }),
+
+  /** Riwayat deploy aplikasi (status, judul, pesan error). */
+  deployments: (applicationId: string) =>
+    call<DokployDeployment[]>("GET", "deployment.all", { applicationId }),
+
+  /** Baris terakhir log satu deploy (bawaan Dokploy: 100 baris). */
+  readLogs: (deploymentId: string) => call<string>("GET", "deployment.readLogs", { deploymentId }),
 
   saveGitProvider: (applicationId: string, gitUrl: string, branch: string) =>
     call("POST", "application.saveGitProvider", {
